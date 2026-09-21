@@ -1,0 +1,42 @@
+{
+  "name": "lexion",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "format": "biome format --write .",
+    "format:check": "biome format .",
+    "lint": "biome lint . && bun run lint:eslint",
+    "lint:eslint": "eslint \"src/**/*.{js,jsx,ts,tsx}\"",
+    "typecheck": "tsc --noEmit",
+    "check": "biome check . && bun run lint:eslint && bun run typecheck",
+    "prepare": "lefthook install"
+  },
+  "dependencies": {
+    "@stylexjs/stylex": "^0.19.1",
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.14",
+    "@stylexjs/eslint-plugin": "^0.19.1",
+    "@stylexjs/unplugin": "^0.19.1",
+    "@tauri-apps/cli": "^2",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "@typescript-eslint/parser": "^8.70.0",
+    "@vitejs/plugin-react": "^6.0.2",
+    "eslint": "^10.11.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "lefthook": "^2.1.14",
+    "oxc-transform-react": "^0.151.0",
+    "typescript": "~6.0.3",
+    "vite": "^8.0.16"
+  }
+}
