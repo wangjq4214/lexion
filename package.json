@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "build:mac": "tauri build --bundles app,dmg",
     "preview": "vite preview",
     "tauri": "tauri",
     "format": "biome format --write .",
@@ -13,10 +14,13 @@
     "lint": "biome lint . && bun run lint:eslint",
     "lint:eslint": "eslint \"src/**/*.{js,jsx,ts,tsx}\"",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
     "check": "biome check . && bun run lint:eslint && bun run typecheck",
     "prepare": "lefthook install"
   },
   "dependencies": {
+    "@astryxdesign/core": "^0.6.2",
+    "@astryxdesign/theme-neutral": "^0.6.2",
     "@stylexjs/stylex": "^0.19.1",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
@@ -24,19 +28,25 @@
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@astryxdesign/cli": "^0.6.2",
     "@biomejs/biome": "2.5.14",
     "@stylexjs/eslint-plugin": "^0.19.1",
     "@stylexjs/unplugin": "^0.19.1",
     "@tauri-apps/cli": "^2",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@typescript-eslint/parser": "^8.70.0",
     "@vitejs/plugin-react": "^6.0.2",
     "eslint": "^10.11.0",
     "eslint-plugin-react-hooks": "^7.1.1",
+    "jsdom": "^30.1.0",
     "lefthook": "^2.1.14",
     "oxc-transform-react": "^0.151.0",
     "typescript": "~6.0.3",
-    "vite": "^8.0.16"
+    "vite": "^8.0.16",
+    "vitest": "^5.0.1"
   }
 }
