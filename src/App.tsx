@@ -19,6 +19,7 @@ import {
   useEffect,
   useLayoutEffect,
   useReducer,
+  useRef,
   useState,
 } from "react";
 import {
@@ -79,6 +80,7 @@ type SummaryState = {
   totalCount: number;
   errorCount: number;
   hintCount: number;
+  elapsedSeconds: number;
 };
 
 type AppState = SetupState | PracticeState | SummaryState;
@@ -87,7 +89,7 @@ type AppAction =
   | { type: "select-mode"; mode: PracticeMode }
   | { type: "start"; mode: PracticeMode; questions: Question[] }
   | { type: "change-answer"; answer: string }
-  | { type: "submit-answer" }
+  | { type: "submit-answer"; elapsedSeconds: number }
   | { type: "reveal-hint"; hint: string }
   | { type: "back-to-setup" };
 
@@ -149,6 +151,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         correctCount: state.questions.length,
         totalCount: state.questions.length,
         errorCount: state.errorCount,
+        elapsedSeconds: action.elapsedSeconds,
         hintCount: state.hintCount,
       };
     }
@@ -171,13 +174,29 @@ const modeLabels: Record<PracticeMode, string> = {
   mixed: "双向混合随机",
 };
 
+type TimeSource = () => number;
+
+const defaultNow: TimeSource = () => performance.now();
+
+function getElapsedSeconds(startedAt: number, now: number) {
+  return Math.max(0, Math.floor((now - startedAt) / 1_000));
+}
+
+function formatElapsedTime(elapsedSeconds: number) {
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
 type AppProps = {
   random?: RandomSource;
+  now?: TimeSource;
   wordbookService?: WordbookService;
 };
 
 function App({
   random = Math.random,
+  now = defaultNow,
   wordbookService = tauriWordbookService,
 }: AppProps) {
   const [state, dispatch] = useReducer(appReducer, initialState);
@@ -186,6 +205,8 @@ function App({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [practiceError, setPracticeError] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const roundStartedAt = useRef<number | null>(null);
 
   useLayoutEffect(() => {
     const { className } = stylex.props(styles.documentRoot);
@@ -240,6 +261,16 @@ function App({
     };
   }, [wordbookService]);
 
+  useEffect(() => {
+    if (state.phase !== "practice") return;
+
+    const intervalId = window.setInterval(() => {
+      if (roundStartedAt.current === null) return;
+      setElapsedSeconds(getElapsedSeconds(roundStartedAt.current, now()));
+    }, 1_000);
+
+    return () => window.clearInterval(intervalId);
+  }, [state.phase, now]);
   const startPractice = async (mode: PracticeMode) => {
     if (activeWordbookId === null || isStarting) return;
     setIsStarting(true);
@@ -253,6 +284,8 @@ function App({
         setPracticeError("这个单词本没有可练习的词条。");
         return;
       }
+      roundStartedAt.current = now();
+      setElapsedSeconds(0);
       dispatch({
         type: "start",
         mode,
@@ -265,6 +298,18 @@ function App({
     } finally {
       setIsStarting(false);
     }
+  };
+
+  const submitAnswer = () => {
+    const currentElapsedSeconds =
+      roundStartedAt.current === null
+        ? elapsedSeconds
+        : getElapsedSeconds(roundStartedAt.current, now());
+    setElapsedSeconds(currentElapsedSeconds);
+    dispatch({
+      type: "submit-answer",
+      elapsedSeconds: currentElapsedSeconds,
+    });
   };
 
   let content: ReactNode;
@@ -366,6 +411,9 @@ function App({
             hasValueLabel
             formatValueLabel={(value, max) => `${value} / ${max}`}
           />
+          <Text color="secondary">
+            本轮用时：{formatElapsedTime(elapsedSeconds)}
+          </Text>
         </Stack>
         <Section>
           <Stack gap={6}>
@@ -380,7 +428,7 @@ function App({
               label={expectsEnglish ? "英文答案" : "中文答案"}
               value={state.answer}
               onChange={(answer) => dispatch({ type: "change-answer", answer })}
-              onEnter={() => dispatch({ type: "submit-answer" })}
+              onEnter={submitAnswer}
               placeholder={
                 expectsEnglish ? "输入完整英文单词" : "输入完整中文释义"
               }
@@ -421,7 +469,7 @@ function App({
               <Button
                 label="提交答案"
                 variant="primary"
-                onClick={() => dispatch({ type: "submit-answer" })}
+                onClick={submitAnswer}
               />
             </Stack>
           </Stack>
@@ -444,6 +492,7 @@ function App({
               </Text>
               <Text>错误次数：{state.errorCount}</Text>
               <Text>提示次数：{state.hintCount}</Text>
+              <Text>总用时：{formatElapsedTime(state.elapsedSeconds)}</Text>
             </Stack>
             {practiceError ? <Text role="alert">{practiceError}</Text> : null}
             <Stack direction="horizontal" gap={3} wrap="wrap" justify="end">

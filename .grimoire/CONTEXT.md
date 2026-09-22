@@ -17,6 +17,12 @@
 - **Relationships:**
   - references wordbook
 
+### practice-round
+- **Definition:** One complete vocabulary practice session created after the user starts practice, covering all sampled questions. Its elapsed time starts when the first question is shown, accumulates across every question including retries and hint use, stops when the final question is answered correctly, and is displayed during practice and in the completion summary in minutes and seconds.
+- **Relationships:**
+  - depends on active-wordbook
+  - contains vocabulary-entry
+
 ### wordbook-import
 - **Definition:** An atomic operation that reads `english` and `chinese` columns from the first worksheet of an `.xlsx` or `.xls` file, defaults the wordbook name from the file name while allowing edits, and persists the resulting wordbook in SQLite. Duplicate pairs are detected after trimming both values and comparing English case-insensitively; the same English word with a different Chinese meaning remains a separate entry. A duplicate wordbook name requires confirmation before replacement.
 - **Relationships:**

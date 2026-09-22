@@ -1,6 +1,12 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type {
   ImportWordbookRequest,
@@ -38,6 +44,10 @@ function createService(options?: {
 }
 
 describe("App wordbook practice", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("shows only the import action when empty and refreshes after import", async () => {
     const user = userEvent.setup();
     const service = createService({ selectedPath: "C:\\books\\starter.xlsx" });
@@ -130,5 +140,92 @@ describe("App wordbook practice", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "开始练习" })).toBeEnabled(),
     );
+  });
+
+  it("tracks total elapsed time across retries, hints, and questions", async () => {
+    let now = 0;
+    const entries = [
+      { id: 1, english: "apple", chinese: "苹果" },
+      { id: 2, english: "book", chinese: "书" },
+    ];
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 2 }],
+      samples: { 1: entries },
+    });
+
+    render(
+      <App now={() => now} random={stableRandom} wordbookService={service} />,
+    );
+
+    const startButton = await screen.findByRole("button", {
+      name: "开始练习",
+    });
+    vi.useFakeTimers();
+    fireEvent.click(startButton);
+    await act(async () => undefined);
+    expect(screen.getByText("本轮用时：0:00")).toBeInTheDocument();
+
+    now = 59_000;
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(screen.getByText("本轮用时：0:59")).toBeInTheDocument();
+
+    const firstAnswer = screen.getByLabelText("英文答案");
+    fireEvent.change(firstAnswer, { target: { value: "wrong" } });
+    fireEvent.keyDown(firstAnswer, { key: "Enter", code: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "显示提示" }));
+
+    now = 60_000;
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(screen.getByText("本轮用时：1:00")).toBeInTheDocument();
+
+    fireEvent.change(firstAnswer, { target: { value: "apple" } });
+    fireEvent.keyDown(firstAnswer, { key: "Enter", code: "Enter" });
+    expect(screen.getByText("本轮用时：1:00")).toBeInTheDocument();
+
+    now = 65_900;
+    const secondAnswer = screen.getByLabelText("英文答案");
+    fireEvent.change(secondAnswer, { target: { value: "book" } });
+    fireEvent.keyDown(secondAnswer, { key: "Enter", code: "Enter" });
+
+    expect(
+      screen.getByRole("heading", { name: "本轮练习完成" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("总用时：1:05")).toBeInTheDocument();
+
+    now = 120_000;
+    act(() => vi.advanceTimersByTime(10_000));
+    expect(screen.getByText("总用时：1:05")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "再练一轮" }));
+    await act(async () => undefined);
+    expect(screen.getByText("本轮用时：0:00")).toBeInTheDocument();
+  });
+
+  it("finalizes the current elapsed time when the submit button is used", async () => {
+    let now = 0;
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: {
+        1: [{ id: 1, english: "apple", chinese: "苹果" }],
+      },
+    });
+
+    render(
+      <App now={() => now} random={stableRandom} wordbookService={service} />,
+    );
+
+    const startButton = await screen.findByRole("button", {
+      name: "开始练习",
+    });
+    vi.useFakeTimers();
+    fireEvent.click(startButton);
+    await act(async () => undefined);
+    fireEvent.change(screen.getByLabelText("英文答案"), {
+      target: { value: "apple" },
+    });
+    now = 1_999;
+    fireEvent.click(screen.getByRole("button", { name: "提交答案" }));
+
+    expect(screen.getByText("总用时：0:01")).toBeInTheDocument();
   });
 });
