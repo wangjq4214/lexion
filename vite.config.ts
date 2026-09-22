@@ -9,6 +9,28 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(() => ({
   plugins: [stylex.vite({ useCSSLayers: true }), react({ compiler: true })],
+  build: {
+    rolldownOptions: {
+      output: {
+        codeSplitting: {
+          groups: [
+            {
+              name: "react",
+              test: /node_modules[\\/](react|react-dom)[\\/]/,
+            },
+            {
+              name: "astryx",
+              test: /node_modules[\\/]@astryxdesign[\\/]/,
+            },
+            {
+              name: "tauri",
+              test: /node_modules[\\/]@tauri-apps[\\/]/,
+            },
+          ],
+        },
+      },
+    },
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

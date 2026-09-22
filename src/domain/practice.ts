@@ -1,4 +1,4 @@
-import type { WordEntry } from "../data/vocabulary";
+import type { WordEntry } from "./word";
 
 export type PracticeMode = "zh-to-en" | "en-to-zh" | "mixed";
 export type QuestionDirection = Exclude<PracticeMode, "mixed">;
@@ -31,7 +31,7 @@ export function createQuestions(
   }
 
   return shuffled.map((entry) => ({
-    id: entry.id,
+    id: String(entry.id),
     entry,
     direction:
       mode === "mixed" ? (random() < 0.5 ? "zh-to-en" : "en-to-zh") : mode,
