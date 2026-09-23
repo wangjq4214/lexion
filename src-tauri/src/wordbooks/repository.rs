@@ -138,7 +138,7 @@ impl WordbookRepository {
              ORDER BY RANDOM()
              LIMIT ?2",
         )?;
-        let rows = statement.query_map(params![wordbook_id, i64::from(limit.min(10))], |row| {
+        let rows = statement.query_map(params![wordbook_id, i64::from(limit)], |row| {
             Ok(WordEntry {
                 id: row.get(0)?,
                 english: row.get(1)?,
@@ -169,7 +169,7 @@ mod tests {
         let path = directory.path().join("wordbooks.sqlite");
         let repository = WordbookRepository::open(&path).unwrap();
         let first = repository
-            .replace("第一册", &entries("first", 12), false)
+            .replace("第一册", &entries("first", 60), false)
             .unwrap();
         repository
             .replace("第二册", &entries("second", 2), false)
@@ -178,10 +178,12 @@ mod tests {
         let reopened = WordbookRepository::open(&path).unwrap();
         let listed = reopened.list().unwrap();
         assert_eq!(listed.len(), 2);
-        assert_eq!(listed[0].entry_count, 12);
+        assert_eq!(listed[0].entry_count, 60);
 
         let sample = reopened.sample(first.id, 50).unwrap();
-        assert_eq!(sample.len(), 10);
+        assert_eq!(sample.len(), 50);
+        assert_eq!(reopened.sample(first.id, 255).unwrap().len(), 60);
+        assert_eq!(reopened.sample(first.id, 5).unwrap().len(), 5);
         assert!(sample
             .iter()
             .all(|entry| entry.english.starts_with("first-")));
@@ -193,6 +195,7 @@ mod tests {
                 .len(),
             sample.len()
         );
+        assert_eq!(reopened.sample(listed[1].id, 50).unwrap().len(), 2);
     }
 
     #[test]

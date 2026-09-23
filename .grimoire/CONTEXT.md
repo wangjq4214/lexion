@@ -13,7 +13,7 @@
   - belongs to wordbook
 
 ### active-wordbook
-- **Definition:** The wordbook selected on the main screen as the source from which the application randomly draws up to ten vocabulary entries for the next practice round.
+- **Definition:** The wordbook selected on the main screen as the source from which the application randomly draws entries for the next practice round, up to the learner's selected practice count and the number of available entries. The default selected count is ten.
 - **Relationships:**
   - references wordbook
 

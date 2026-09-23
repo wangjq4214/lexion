@@ -99,6 +99,102 @@ describe("App wordbook practice", () => {
     expect(screen.getByText("答对题数：2 / 2")).toBeInTheDocument();
   });
 
+  it.each([5, 20, 50])("requests the %i-word preset", async (count) => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 100 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByLabelText("本轮单词数"));
+    await user.click(
+      await screen.findByRole("option", { name: `${count} 个单词` }),
+    );
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    expect(service.sampleWordbook).toHaveBeenCalledWith(1, count);
+    expect(await screen.findByText("0 / 1")).toBeInTheDocument();
+  });
+
+  it("tracks actual progress above ten questions even when fewer than requested", async () => {
+    const user = userEvent.setup();
+    const entries = Array.from({ length: 12 }, (_, index) => ({
+      id: index + 1,
+      english: `word-${index + 1}`,
+      chinese: `释义-${index + 1}`,
+    }));
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 12 }],
+      samples: { 1: entries },
+    });
+    render(<App random={stableRandom} wordbookService={service} />);
+    await user.click(await screen.findByLabelText("本轮单词数"));
+    await user.click(await screen.findByRole("option", { name: "20 个单词" }));
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    expect(service.sampleWordbook).toHaveBeenCalledWith(1, 20);
+    expect(await screen.findByText("0 / 12")).toBeInTheDocument();
+    for (let index = 0; index < entries.length; index += 1) {
+      const prompt = screen.getByRole("heading", { level: 1 }).textContent;
+      const answer = entries.find((entry) => entry.chinese === prompt)?.english;
+      expect(answer).toBeDefined();
+      await user.type(screen.getByLabelText("英文答案"), `${answer}{Enter}`);
+    }
+    expect(screen.getByText("答对题数：12 / 12")).toBeInTheDocument();
+  });
+
+  it("validates custom counts and reuses the selection on another round", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByLabelText("本轮单词数"));
+    await user.click(await screen.findByRole("option", { name: "自定义" }));
+    const input = screen.getByLabelText("自定义单词数");
+    const start = screen.getByRole("button", { name: "开始练习" });
+    expect(start).toBeDisabled();
+    for (const invalid of ["0", "256", "2.5", "abc", "-1"]) {
+      await user.clear(input);
+      await user.type(input, invalid);
+      expect(start).toBeDisabled();
+      expect(input).toHaveAttribute("aria-invalid", "true");
+    }
+    expect(service.sampleWordbook).not.toHaveBeenCalled();
+    await user.clear(input);
+    await user.type(input, "1");
+    expect(start).toBeEnabled();
+    await user.clear(input);
+    await user.type(input, "255");
+    expect(start).toBeEnabled();
+    await user.click(start);
+    expect(service.sampleWordbook).toHaveBeenCalledWith(1, 255);
+    expect(await screen.findByText("0 / 1")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("英文答案"), "apple{Enter}");
+    expect(screen.getByText("答对题数：1 / 1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "再练一轮" }));
+    expect(service.sampleWordbook).toHaveBeenLastCalledWith(1, 255);
+  });
+  it("uses the selected count with a different wordbook", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [
+        { id: 1, name: "基础", entryCount: 1 },
+        { id: 2, name: "进阶", entryCount: 1 },
+      ],
+      samples: { 2: [{ id: 2, english: "book", chinese: "书" }] },
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByLabelText("当前单词本"));
+    await user.click(await screen.findByRole("option", { name: /进阶/ }));
+    await user.click(screen.getByLabelText("本轮单词数"));
+    await user.click(await screen.findByRole("option", { name: "5 个单词" }));
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    expect(service.sampleWordbook).toHaveBeenCalledWith(2, 5);
+    expect(
+      await screen.findByRole("heading", { name: "书" }),
+    ).toBeInTheDocument();
+  });
+
   it("locks wordbook and mode controls while a sample is loading", async () => {
     const user = userEvent.setup();
     let resolveSample: (entries: WordEntry[]) => void = () => undefined;
@@ -111,9 +207,15 @@ describe("App wordbook practice", () => {
     service.sampleWordbook = vi.fn(async () => sample);
     render(<App wordbookService={service} />);
 
+    await user.click(await screen.findByLabelText("本轮单词数"));
+    await user.click(await screen.findByRole("option", { name: "自定义" }));
+    await user.type(screen.getByLabelText("自定义单词数"), "20");
     await user.click(await screen.findByRole("button", { name: "开始练习" }));
 
     expect(screen.getByLabelText("当前单词本")).toBeDisabled();
+    expect(screen.getByLabelText("本轮单词数")).toBeDisabled();
+    expect(screen.getByLabelText("自定义单词数")).toBeDisabled();
+    expect(service.sampleWordbook).toHaveBeenCalledWith(1, 20);
     expect(screen.getByRole("button", { name: "看中文拼英文" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "导入单词本" })).toBeDisabled();
     await act(async () => {
@@ -134,9 +236,9 @@ describe("App wordbook practice", () => {
     render(<App wordbookService={service} />);
 
     await user.click(await screen.findByRole("button", { name: "开始练习" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "没有可练习的词条",
-    );
+    expect(
+      await screen.findByText("这个单词本没有可练习的词条。"),
+    ).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "开始练习" })).toBeEnabled(),
     );
