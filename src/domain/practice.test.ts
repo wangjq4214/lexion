@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  createEnglishHint,
+  createEnglishHints,
   createQuestions,
   isExactAnswer,
   type Question,
@@ -77,19 +77,35 @@ describe("isExactAnswer", () => {
   });
 });
 
-describe("createEnglishHint", () => {
-  it("forces at least one blank when randomness would reveal every letter", () => {
-    const hint = createEnglishHint("apple", constantRandom(0.9));
+describe("createEnglishHints", () => {
+  it("reveals approximately one and then two thirds without hiding letters again", () => {
+    const [first, second] = createEnglishHints("abcdef", constantRandom(0));
+    const firstLetters = first.split(" ");
+    const secondLetters = second.split(" ");
 
-    expect(hint).toContain("_");
-    expect(hint.split(" ").join("")).toHaveLength(5);
+    expect(firstLetters.filter((letter) => letter !== "_")).toHaveLength(2);
+    expect(secondLetters.filter((letter) => letter !== "_")).toHaveLength(4);
+    expect(secondLetters).toContain("_");
+    firstLetters.forEach((letter, index) => {
+      if (letter !== "_") expect(secondLetters[index]).toBe(letter);
+    });
   });
 
-  it("keeps at least one visible letter when randomness would blank every letter", () => {
-    const hint = createEnglishHint("apple", constantRandom(0));
-    const compactHint = hint.split(" ").join("");
+  it("keeps short words incomplete until the third hint", () => {
+    expect(createEnglishHints("a", constantRandom(0))).toEqual(["_", "_"]);
+    const hints = createEnglishHints("ab", constantRandom(0));
+    expect(hints[0]).toContain("_");
+    expect(hints[1]).toBe(hints[0]);
+  });
 
-    expect(compactHint).toContain("_");
-    expect(compactHint).toMatch(/[a-z]/i);
+  it("preserves non-letters and masks only English letters", () => {
+    const [first, second] = createEnglishHints("a-b c", constantRandom(0));
+    expect(
+      first.split(" ").filter((character) => character === "-"),
+    ).toHaveLength(1);
+    expect(
+      second.split(" ").filter((character) => character === "_"),
+    ).toHaveLength(1);
+    expect(first.split(" ").join("")).toHaveLength(4);
   });
 });

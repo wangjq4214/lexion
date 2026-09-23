@@ -172,7 +172,7 @@ describe("App wordbook practice", () => {
     const firstAnswer = screen.getByLabelText("英文答案");
     fireEvent.change(firstAnswer, { target: { value: "wrong" } });
     fireEvent.keyDown(firstAnswer, { key: "Enter", code: "Enter" });
-    fireEvent.click(screen.getByRole("button", { name: "显示提示" }));
+    fireEvent.click(screen.getByRole("button", { name: "显示第 1 级提示" }));
 
     now = 60_000;
     act(() => vi.advanceTimersByTime(1_000));
@@ -199,6 +199,86 @@ describe("App wordbook practice", () => {
     fireEvent.click(screen.getByRole("button", { name: "再练一轮" }));
     await act(async () => undefined);
     expect(screen.getByText("本轮用时：0:00")).toBeInTheDocument();
+  });
+
+  it("advances three hint levels and treats the third as a skip", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "abcdef", chinese: "示例" }] },
+    });
+    render(<App random={stableRandom} wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(screen.getByRole("button", { name: "显示第 1 级提示" }));
+    expect(screen.getByText("拼写提示（第 1 级）")).toBeInTheDocument();
+    const first = screen.getByText(/_/).textContent ?? "";
+    await user.click(screen.getByRole("button", { name: "显示第 2 级提示" }));
+    expect(screen.getByText("拼写提示（第 2 级）")).toBeInTheDocument();
+    const second = screen.getByText(/_/).textContent ?? "";
+    expect(first.split(" ").filter((letter) => letter !== "_")).toHaveLength(2);
+    expect(second.split(" ").filter((letter) => letter !== "_")).toHaveLength(
+      4,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "显示第 3 级提示并跳过" }),
+    );
+    expect(screen.getByText("英文：abcdef")).toBeInTheDocument();
+    expect(screen.getByText("中文释义：示例")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "提交答案" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看练习结果" }));
+    expect(screen.getByText("答对题数：0 / 1")).toBeInTheDocument();
+    expect(screen.getByText("提示次数：3")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
+  });
+
+  it("retains used hints on direct skip and resets hint levels in a new round", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    render(<App random={stableRandom} wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(screen.getByRole("button", { name: "显示第 1 级提示" }));
+    await user.click(screen.getByRole("button", { name: "显示第 2 级提示" }));
+    await user.click(screen.getByRole("button", { name: "跳过" }));
+    await user.click(screen.getByRole("button", { name: "查看练习结果" }));
+    expect(screen.getByText("提示次数：2")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "再练一轮" }));
+    expect(
+      await screen.findByRole("button", { name: "显示第 1 级提示" }),
+    ).toBeInTheDocument();
+    await user.type(screen.getByLabelText("英文答案"), "apple{Enter}");
+    expect(screen.getByText("提示次数：0")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：0")).toBeInTheDocument();
+  });
+
+  it("allows a correct answer after partial hints and resets on the next question", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 2 }],
+      samples: {
+        1: [
+          { id: 1, english: "apple", chinese: "苹果" },
+          { id: 2, english: "book", chinese: "书" },
+        ],
+      },
+    });
+    render(<App random={stableRandom} wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(screen.getByRole("button", { name: "显示第 1 级提示" }));
+    await user.click(screen.getByRole("button", { name: "显示第 2 级提示" }));
+    await user.type(screen.getByLabelText("英文答案"), "apple{Enter}");
+    expect(
+      screen.getByRole("button", { name: "显示第 1 级提示" }),
+    ).toBeInTheDocument();
+    await user.type(screen.getByLabelText("英文答案"), "book{Enter}");
+    expect(screen.getByText("答对题数：2 / 2")).toBeInTheDocument();
+    expect(screen.getByText("提示次数：2")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：0")).toBeInTheDocument();
   });
 
   it("reveals a skipped word and counts only answered questions", async () => {
@@ -294,7 +374,7 @@ describe("App wordbook practice", () => {
     vi.useFakeTimers();
     fireEvent.click(start);
     await act(async () => undefined);
-    fireEvent.click(screen.getByRole("button", { name: "显示提示" }));
+    fireEvent.click(screen.getByRole("button", { name: "显示第 1 级提示" }));
     now = 5_000;
     fireEvent.click(screen.getByRole("button", { name: "跳过" }));
     now = 8_000;

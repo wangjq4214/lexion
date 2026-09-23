@@ -64,32 +64,38 @@ export function isExactAnswer(input: string, question: Question): boolean {
   return normalizedInput === expectedAnswer;
 }
 
-export function createEnglishHint(
+export function createEnglishHints(
   word: string,
   random: RandomSource = Math.random,
-): string {
+): [string, string] {
   const characters = Array.from(word);
   const letterIndexes = characters
     .map((character, index) => (/^[a-z]$/i.test(character) ? index : -1))
     .filter((index) => index >= 0);
 
-  if (letterIndexes.length === 0) {
-    return word;
+  for (let index = letterIndexes.length - 1; index > 0; index -= 1) {
+    const swapIndex = randomIndex(index + 1, random);
+    [letterIndexes[index], letterIndexes[swapIndex]] = [
+      letterIndexes[swapIndex],
+      letterIndexes[index],
+    ];
   }
 
-  const maskedIndexes = new Set(letterIndexes.filter(() => random() < 0.5));
-
-  if (maskedIndexes.size === 0) {
-    maskedIndexes.add(letterIndexes[randomIndex(letterIndexes.length, random)]);
-  }
-
-  if (maskedIndexes.size === letterIndexes.length && letterIndexes.length > 1) {
-    maskedIndexes.delete(
-      letterIndexes[randomIndex(letterIndexes.length, random)],
+  const maxVisible = Math.max(0, letterIndexes.length - 1);
+  const formatHint = (fraction: number): string => {
+    const visibleCount = Math.min(
+      maxVisible,
+      Math.round(letterIndexes.length * fraction),
     );
-  }
+    const visibleIndexes = new Set(letterIndexes.slice(0, visibleCount));
+    return characters
+      .map((character, index) =>
+        /^[a-z]$/i.test(character) && !visibleIndexes.has(index)
+          ? "_"
+          : character,
+      )
+      .join(" ");
+  };
 
-  return characters
-    .map((character, index) => (maskedIndexes.has(index) ? "_" : character))
-    .join(" ");
+  return [formatHint(1 / 3), formatHint(2 / 3)];
 }

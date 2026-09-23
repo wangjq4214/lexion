@@ -18,7 +18,7 @@
   - references wordbook
 
 ### practice-round
-- **Definition:** One complete vocabulary practice session created after the user starts practice, covering all sampled questions. A question is completed by answering correctly or skipping it; skipping reveals the English word and Chinese meaning, does not count as correct, and advances after the learner has seen the answer. Its elapsed time starts when the first question is shown, accumulates across questions including retries, hint use, and skips, and stops when the last question is completed. The completion summary displays minutes and seconds, correct answers, error count, hint count, and skip count, but does not list skipped words.
+- **Definition:** One complete vocabulary practice session created after the user starts practice, covering all sampled questions. A question is completed by answering correctly or skipping it. In Chinese-to-English questions, hints have three sequential levels: the first reveals about one third of the English letters, the second about two thirds while retaining earlier reveals, and the third reveals the full word. Each level counts as one hint use; the third is equivalent to skipping: it reveals the English word and Chinese meaning, counts as skipped rather than correct, and advances only after the learner has seen the answer. Direct skipping has the same reveal and continuation behavior. Elapsed time starts when the first question is shown, includes retries, hints, and skips, and stops when the last question is completed. The completion summary displays minutes and seconds, correct answers, error count, hint count, and skip count, but does not list skipped words.
 - **Relationships:**
   - depends on active-wordbook
   - contains vocabulary-entry

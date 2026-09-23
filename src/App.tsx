@@ -28,7 +28,7 @@ import {
   type WordbookSummary,
 } from "./data/wordbooks";
 import {
-  createEnglishHint,
+  createEnglishHints,
   createQuestions,
   getExpectedAnswer,
   getQuestionPrompt,
@@ -73,7 +73,8 @@ type PracticeState = {
   correctCount: number;
   skippedCount: number;
   isAnswerRevealed: boolean;
-  hint: string | null;
+  hintLevel: 0 | 1 | 2;
+  hints: [string, string] | null;
 };
 
 type SummaryState = {
@@ -94,7 +95,8 @@ type AppAction =
   | { type: "start"; mode: PracticeMode; questions: Question[] }
   | { type: "change-answer"; answer: string }
   | { type: "submit-answer"; elapsedSeconds: number }
-  | { type: "reveal-hint"; hint: string }
+  | { type: "start-hints"; hints: [string, string] }
+  | { type: "advance-hint" }
   | { type: "skip-question" }
   | { type: "continue-after-skip"; elapsedSeconds: number }
   | { type: "back-to-setup" };
@@ -122,7 +124,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
       correctCount: 0,
       skippedCount: 0,
       isAnswerRevealed: false,
-      hint: null,
+      hintLevel: 0,
+      hints: null,
     };
   }
 
@@ -140,9 +143,33 @@ function appReducer(state: AppState, action: AppAction): AppState {
       : { ...state, answer: action.answer, error: null };
   }
 
-  if (action.type === "reveal-hint") {
-    if (state.isAnswerRevealed || state.hint !== null) return state;
-    return { ...state, hint: action.hint, hintCount: state.hintCount + 1 };
+  if (action.type === "start-hints") {
+    if (
+      state.isAnswerRevealed ||
+      state.hintLevel !== 0 ||
+      state.questions[state.questionIndex].direction !== "zh-to-en"
+    )
+      return state;
+    return {
+      ...state,
+      hints: action.hints,
+      hintLevel: 1,
+      hintCount: state.hintCount + 1,
+    };
+  }
+
+  if (action.type === "advance-hint") {
+    if (state.isAnswerRevealed || !state.hints || state.hintLevel === 0)
+      return state;
+    if (state.hintLevel === 1) {
+      return { ...state, hintLevel: 2, hintCount: state.hintCount + 1 };
+    }
+    return {
+      ...state,
+      isAnswerRevealed: true,
+      hintCount: state.hintCount + 1,
+      skippedCount: state.skippedCount + 1,
+    };
   }
 
   if (action.type === "skip-question") {
@@ -194,7 +221,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
       questionIndex: state.questionIndex + 1,
       answer: "",
       error: null,
-      hint: null,
+      hintLevel: 0,
+      hints: null,
       isAnswerRevealed: false,
     };
   }
@@ -494,28 +522,35 @@ function App({
                   hasAutoFocus
                   width="100%"
                 />
-                {state.hint ? (
+                {state.hintLevel > 0 && state.hints ? (
                   <Stack gap={1} role="status" aria-live="polite">
-                    <Text type="supporting">拼写提示</Text>
+                    <Text type="supporting">
+                      拼写提示（第 {state.hintLevel} 级）
+                    </Text>
                     <Text type="code" weight="semibold">
-                      {state.hint}
+                      {state.hints[state.hintLevel - 1]}
                     </Text>
                   </Stack>
                 ) : null}
                 <Stack direction="horizontal" gap={3} wrap="wrap" justify="end">
                   {expectsEnglish ? (
                     <Button
-                      label={state.hint ? "提示已显示" : "显示提示"}
+                      label={
+                        state.hintLevel === 2
+                          ? "显示第 3 级提示并跳过"
+                          : `显示第 ${state.hintLevel + 1} 级提示`
+                      }
                       variant="secondary"
-                      isDisabled={state.hint !== null}
                       onClick={() =>
-                        dispatch({
-                          type: "reveal-hint",
-                          hint: createEnglishHint(
-                            getExpectedAnswer(question),
-                            random,
-                          ),
-                        })
+                        state.hintLevel === 0
+                          ? dispatch({
+                              type: "start-hints",
+                              hints: createEnglishHints(
+                                getExpectedAnswer(question),
+                                random,
+                              ),
+                            })
+                          : dispatch({ type: "advance-hint" })
                       }
                     />
                   ) : null}
