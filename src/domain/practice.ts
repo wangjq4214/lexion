@@ -1,6 +1,7 @@
 import type { WordEntry } from "./word";
 
 export type PracticeMode = "zh-to-en" | "en-to-zh" | "mixed";
+export type PracticeSource = "wordbook" | "favorites" | "mistakes";
 export type QuestionDirection = Exclude<PracticeMode, "mixed">;
 export type RandomSource = () => number;
 

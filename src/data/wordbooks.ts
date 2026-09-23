@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { WordEntry } from "../domain/word";
 
+export type MistakeEntry = WordEntry & { errorCount: number };
+
 export type WordbookSummary = {
   id: number;
   name: string;
@@ -44,6 +46,9 @@ export type WordbookService = {
   isFavorite(english: string, chinese: string): Promise<boolean>;
   listFavorites(): Promise<WordEntry[]>;
   sampleFavorites(limit: number): Promise<WordEntry[]>;
+  recordMistake(english: string, chinese: string): Promise<MistakeEntry>;
+  listMistakes(): Promise<MistakeEntry[]>;
+  sampleMistakes(limit: number): Promise<WordEntry[]>;
 };
 
 function commandError(error: unknown): WordbookError {
@@ -122,6 +127,23 @@ export const tauriWordbookService: WordbookService = {
   },
   sampleFavorites(limit) {
     return invoke<WordEntry[]>("sample_favorites", { limit }).catch((error) => {
+      throw commandError(error);
+    });
+  },
+  recordMistake(english, chinese) {
+    return invoke<MistakeEntry>("record_mistake", { english, chinese }).catch(
+      (error) => {
+        throw commandError(error);
+      },
+    );
+  },
+  listMistakes() {
+    return invoke<MistakeEntry[]>("list_mistakes").catch((error) => {
+      throw commandError(error);
+    });
+  },
+  sampleMistakes(limit) {
+    return invoke<WordEntry[]>("sample_mistakes", { limit }).catch((error) => {
       throw commandError(error);
     });
   },

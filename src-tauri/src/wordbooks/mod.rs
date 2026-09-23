@@ -5,7 +5,7 @@ mod repository;
 use serde::Serialize;
 use tauri::State;
 
-pub use model::{ImportResult, WordEntry, WordbookSummary};
+pub use model::{ImportResult, MistakeEntry, WordEntry, WordbookSummary};
 pub use repository::WordbookRepository;
 
 #[derive(Debug, Serialize)]
@@ -104,6 +104,36 @@ pub fn sample_favorites(
 ) -> Result<Vec<WordEntry>, CommandError> {
     repository
         .sample_favorites(limit)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
+pub fn record_mistake(
+    english: String,
+    chinese: String,
+    repository: State<'_, WordbookRepository>,
+) -> Result<MistakeEntry, CommandError> {
+    repository
+        .record_mistake(&english, &chinese)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
+pub fn list_mistakes(
+    repository: State<'_, WordbookRepository>,
+) -> Result<Vec<MistakeEntry>, CommandError> {
+    repository
+        .list_mistakes()
+        .map_err(|error| CommandError::Database(error.to_string()))
+}
+
+#[tauri::command]
+pub fn sample_mistakes(
+    limit: u8,
+    repository: State<'_, WordbookRepository>,
+) -> Result<Vec<WordEntry>, CommandError> {
+    repository
+        .sample_mistakes(limit)
         .map_err(map_repository_error)
 }
 

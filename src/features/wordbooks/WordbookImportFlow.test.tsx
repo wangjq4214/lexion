@@ -21,6 +21,14 @@ function service(overrides?: Partial<WordbookService>): WordbookService {
     isFavorite: vi.fn(async () => false),
     listFavorites: vi.fn(async () => []),
     sampleFavorites: vi.fn(async () => []),
+    recordMistake: vi.fn(async (english, chinese) => ({
+      id: 1,
+      english,
+      chinese,
+      errorCount: 1,
+    })),
+    listMistakes: vi.fn(async () => []),
+    sampleMistakes: vi.fn(async () => []),
     ...overrides,
   };
 }

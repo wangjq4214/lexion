@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
-use super::model::{ImportedEntry, WordEntry, WordbookSummary};
+use super::model::{ImportedEntry, MistakeEntry, WordEntry, WordbookSummary};
 
 #[derive(Debug)]
 pub enum RepositoryError {
@@ -58,6 +58,14 @@ impl WordbookRepository {
                 english TEXT NOT NULL CHECK(length(english) > 0),
                 chinese TEXT NOT NULL CHECK(length(chinese) > 0),
                 normalized_english TEXT NOT NULL,
+                UNIQUE(normalized_english, chinese)
+            );
+            CREATE TABLE IF NOT EXISTS mistakes (
+                id INTEGER PRIMARY KEY,
+                english TEXT NOT NULL CHECK(length(english) > 0),
+                chinese TEXT NOT NULL CHECK(length(chinese) > 0),
+                normalized_english TEXT NOT NULL,
+                error_count INTEGER NOT NULL DEFAULT 1 CHECK(error_count > 0),
                 UNIQUE(normalized_english, chinese)
             );",
         )?;
@@ -191,6 +199,44 @@ impl WordbookRepository {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    pub fn record_mistake(
+        &self,
+        english: &str,
+        chinese: &str,
+    ) -> Result<MistakeEntry, RepositoryError> {
+        let (english, chinese) = favorite_pair(english, chinese)?;
+        let connection = self.connect()?;
+        // A single UPSERT avoids losing increments when two submissions use separate connections.
+        Ok(connection.query_row(
+            "INSERT INTO mistakes(english, chinese, normalized_english, error_count)
+             VALUES (?1, ?2, ?3, 1)
+             ON CONFLICT(normalized_english, chinese)
+             DO UPDATE SET error_count = error_count + 1
+             RETURNING id, english, chinese, error_count",
+            params![english, chinese, english.to_lowercase()],
+            mistake_entry,
+        )?)
+    }
+
+    pub fn list_mistakes(&self) -> Result<Vec<MistakeEntry>, rusqlite::Error> {
+        let connection = self.connect()?;
+        let mut statement = connection
+            .prepare("SELECT id, english, chinese, error_count FROM mistakes ORDER BY id")?;
+        let rows = statement.query_map([], mistake_entry)?;
+        rows.collect()
+    }
+
+    pub fn sample_mistakes(&self, limit: u8) -> Result<Vec<WordEntry>, RepositoryError> {
+        if limit == 0 {
+            return Err(RepositoryError::Validation("练习数量必须大于零"));
+        }
+        let connection = self.connect()?;
+        let mut statement = connection
+            .prepare("SELECT id, english, chinese FROM mistakes ORDER BY RANDOM() LIMIT ?1")?;
+        let rows = statement.query_map([i64::from(limit)], word_entry)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn sample(&self, wordbook_id: i64, limit: u8) -> Result<Vec<WordEntry>, rusqlite::Error> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
@@ -220,6 +266,15 @@ fn favorite_pair<'a>(
         return Err(RepositoryError::Validation("英文和中文释义都不能为空"));
     }
     Ok((english, chinese))
+}
+
+fn mistake_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<MistakeEntry> {
+    Ok(MistakeEntry {
+        id: row.get(0)?,
+        english: row.get(1)?,
+        chinese: row.get(2)?,
+        error_count: row.get(3)?,
+    })
 }
 
 fn word_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordEntry> {
@@ -431,6 +486,99 @@ mod tests {
             Err(RepositoryError::Validation(_))
         ));
         assert!(repository.list_favorites().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mistakes_increment_by_normalized_pair_and_preserve_first_display_text() {
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        let first = repository.record_mistake(" Apple ", " 苹果 ").unwrap();
+        assert_eq!(first.error_count, 1);
+        let repeated = repository.record_mistake("apple", "苹果").unwrap();
+        assert_eq!(repeated.id, first.id);
+        assert_eq!(repeated.english, "Apple");
+        assert_eq!(repeated.chinese, "苹果");
+        assert_eq!(repeated.error_count, 2);
+        let another = repository.record_mistake("APPLE", "水果").unwrap();
+        assert_ne!(another.id, first.id);
+        assert_eq!(another.error_count, 1);
+        assert_eq!(
+            repository.list_mistakes().unwrap(),
+            vec![repeated.clone(), another]
+        );
+        assert_eq!(
+            serde_json::to_value(repeated).unwrap(),
+            serde_json::json!({"id": first.id, "english": "Apple", "chinese": "苹果", "errorCount": 2})
+        );
+    }
+
+    #[test]
+    fn mistakes_survive_wordbook_replacement_and_reopening() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("words.sqlite");
+        let repository = WordbookRepository::open(&path).unwrap();
+        repository
+            .replace("同名", &entries("old", 2), false)
+            .unwrap();
+        let mistake = repository.record_mistake("old-0", "释义-0").unwrap();
+        repository
+            .replace("同名", &entries("new", 2), true)
+            .unwrap();
+        drop(repository);
+
+        let reopened = WordbookRepository::open(&path).unwrap();
+        assert_eq!(reopened.list_mistakes().unwrap(), vec![mistake.clone()]);
+        assert_eq!(
+            reopened
+                .record_mistake("OLD-0", "释义-0")
+                .unwrap()
+                .error_count,
+            2
+        );
+        assert_eq!(
+            reopened.sample_mistakes(10).unwrap(),
+            vec![WordEntry {
+                id: mistake.id,
+                english: mistake.english,
+                chinese: mistake.chinese,
+            }]
+        );
+    }
+
+    #[test]
+    fn mistake_sampling_is_bounded_unique_and_validated() {
+        use std::collections::HashSet;
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        assert!(repository.sample_mistakes(10).unwrap().is_empty());
+        for (english, chinese) in [(" ", "释义"), ("word", " ")] {
+            assert!(matches!(
+                repository.record_mistake(english, chinese),
+                Err(RepositoryError::Validation(_))
+            ));
+        }
+        assert!(matches!(
+            repository.sample_mistakes(0),
+            Err(RepositoryError::Validation(_))
+        ));
+        assert!(repository.list_mistakes().unwrap().is_empty());
+        for index in 0..60 {
+            repository
+                .record_mistake(&format!("word-{index}"), "释义")
+                .unwrap();
+        }
+        for limit in [1, 5, 50, 255] {
+            let sample = repository.sample_mistakes(limit).unwrap();
+            assert_eq!(sample.len(), usize::from(limit).min(60));
+            assert_eq!(
+                sample
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                sample.len()
+            );
+        }
     }
 
     #[test]

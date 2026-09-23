@@ -16,6 +16,15 @@ pub struct WordEntry {
     pub chinese: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MistakeEntry {
+    pub id: i64,
+    pub english: String,
+    pub chinese: String,
+    pub error_count: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImportResult {

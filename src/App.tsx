@@ -15,6 +15,7 @@ import {
   useState,
 } from "react";
 import {
+  type MistakeEntry,
   tauriWordbookService,
   type WordbookService,
   type WordbookSummary,
@@ -23,11 +24,14 @@ import {
   createEnglishHints,
   createQuestions,
   getExpectedAnswer,
+  isExactAnswer,
   type PracticeMode,
+  type PracticeSource,
   type RandomSource,
 } from "./domain/practice";
 import type { WordEntry } from "./domain/word";
 import { FavoritesList } from "./features/favorites/FavoritesList";
+import { MistakesList } from "./features/mistakes/MistakesList";
 import { PracticeQuestion } from "./features/practice/PracticeQuestion";
 import { PracticeSetup } from "./features/practice/PracticeSetup";
 import { PracticeSummary } from "./features/practice/PracticeSummary";
@@ -65,6 +69,24 @@ function getElapsedSeconds(startedAt: number, now: number) {
   return Math.max(0, Math.floor((now - startedAt) / 1_000));
 }
 
+async function waitForMistakeWrites(pending: Set<Promise<unknown>>) {
+  if (pending.size === 0) return;
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      Promise.allSettled([...pending]),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error("错题记录尚未完成，请稍后重试。")),
+          10_000,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 type AppProps = {
   random?: RandomSource;
   now?: TimeSource;
@@ -81,11 +103,18 @@ function App({
   const [wordbooks, setWordbooks] = useState<WordbookSummary[] | null>(null);
   const [activeWordbookId, setActiveWordbookId] = useState<number | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [practiceSource, setPracticeSource] = useState<
-    "wordbook" | "favorites"
-  >("wordbook");
+  const [practiceSource, setPracticeSource] =
+    useState<PracticeSource>("wordbook");
   const [showFavorites, setShowFavorites] = useState(false);
   const [favorites, setFavorites] = useState<WordEntry[] | null>(null);
+  const [showMistakes, setShowMistakes] = useState(false);
+  const [mistakes, setMistakes] = useState<MistakeEntry[] | null>(null);
+  const [mistakesError, setMistakesError] = useState<string | null>(null);
+  const [mistakeWriteError, setMistakeWriteError] = useState<string | null>(
+    null,
+  );
+  const mistakesRequest = useRef(0);
+  const pendingMistakeWrites = useRef(new Set<Promise<unknown>>());
   const [favoritesError, setFavoritesError] = useState<string | null>(null);
   const [favoriteWriteError, setFavoriteWriteError] = useState<string | null>(
     null,
@@ -286,6 +315,26 @@ function App({
       },
     );
   };
+  const openMistakes = () => {
+    const request = ++mistakesRequest.current;
+    setMistakes(null);
+    setMistakesError(null);
+    setShowMistakes(true);
+    void (async () => {
+      try {
+        await waitForMistakeWrites(pendingMistakeWrites.current);
+        if (mistakesRequest.current !== request) return;
+        const entries = await wordbookService.listMistakes();
+        if (mistakesRequest.current === request) setMistakes(entries);
+      } catch (error) {
+        if (mistakesRequest.current === request) {
+          setMistakesError(
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+    })();
+  };
 
   const removeFavorite = async (entry: WordEntry) => {
     if (removingFavoriteId !== null) return;
@@ -307,18 +356,25 @@ function App({
     setIsStarting(true);
     setPracticeError(null);
     try {
+      if (practiceSource === "mistakes") {
+        await waitForMistakeWrites(pendingMistakeWrites.current);
+      }
       const entries =
         practiceSource === "favorites"
           ? await wordbookService.sampleFavorites(practiceCount)
-          : await wordbookService.sampleWordbook(
-              activeWordbookId,
-              practiceCount,
-            );
+          : practiceSource === "mistakes"
+            ? await wordbookService.sampleMistakes(practiceCount)
+            : await wordbookService.sampleWordbook(
+                activeWordbookId,
+                practiceCount,
+              );
       if (entries.length === 0) {
         setPracticeError(
           practiceSource === "favorites"
             ? "收藏夹还没有可练习的单词。"
-            : "这个单词本没有可练习的词条。",
+            : practiceSource === "mistakes"
+              ? "错题本还没有可练习的单词。"
+              : "这个单词本没有可练习的词条。",
         );
         return;
       }
@@ -347,7 +403,23 @@ function App({
     setElapsedSeconds(currentElapsedSeconds);
     dispatch({ type, elapsedSeconds: currentElapsedSeconds });
   };
-  const submitAnswer = () => completeQuestion("submit-answer");
+  const submitAnswer = () => {
+    if (state.phase !== "practice" || state.isAnswerRevealed) return;
+    const question = state.questions[state.questionIndex];
+    if (!isExactAnswer(state.answer, question)) {
+      const { english, chinese } = question.entry;
+      const write = wordbookService
+        .recordMistake(english, chinese)
+        .catch((error) => {
+          setMistakeWriteError(
+            `记录错题失败：${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+      pendingMistakeWrites.current.add(write);
+      void write.finally(() => pendingMistakeWrites.current.delete(write));
+    }
+    completeQuestion("submit-answer");
+  };
 
   let content: ReactNode;
 
@@ -386,6 +458,18 @@ function App({
         }}
       />
     );
+  } else if (showMistakes && state.phase === "setup") {
+    content = (
+      <MistakesList
+        entries={mistakes}
+        error={mistakesError}
+        onRetry={openMistakes}
+        onBack={() => {
+          mistakesRequest.current += 1;
+          setShowMistakes(false);
+        }}
+      />
+    );
   } else if (state.phase === "setup") {
     content = (
       <PracticeSetup
@@ -400,6 +484,7 @@ function App({
           setPracticeError(null);
         }}
         onOpenFavorites={openFavorites}
+        onOpenMistakes={openMistakes}
         onImported={refreshWordbooks}
         onSelectMode={(mode) => dispatch({ type: "select-mode", mode })}
         countSelection={countSelection}
@@ -465,6 +550,16 @@ function App({
                     label="关闭收藏错误提示"
                     variant="ghost"
                     onClick={() => setFavoriteWriteError(null)}
+                  />
+                </Stack>
+              ) : null}
+              {mistakeWriteError ? (
+                <Stack gap={2}>
+                  <Text role="alert">{mistakeWriteError}</Text>
+                  <Button
+                    label="关闭错题错误提示"
+                    variant="ghost"
+                    onClick={() => setMistakeWriteError(null)}
                   />
                 </Stack>
               ) : null}

@@ -25,7 +25,10 @@ pub fn run() {
             wordbooks::remove_favorite,
             wordbooks::is_favorite,
             wordbooks::list_favorites,
-            wordbooks::sample_favorites
+            wordbooks::sample_favorites,
+            wordbooks::record_mistake,
+            wordbooks::list_mistakes,
+            wordbooks::sample_mistakes
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
