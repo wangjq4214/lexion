@@ -7,6 +7,7 @@ export type RandomSource = () => number;
 
 export type Question = {
   id: string;
+  reviewId?: number;
   entry: WordEntry;
   direction: QuestionDirection;
 };

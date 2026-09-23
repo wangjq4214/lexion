@@ -13,6 +13,8 @@ import { formatElapsedTime, modeLabels } from "./presentation";
 type PracticeQuestionProps = {
   state: PracticeState;
   elapsedSeconds: number;
+  isCompleting: boolean;
+  isBlocked: boolean;
   onChangeAnswer: (answer: string) => void;
   isFavorite: boolean | null;
   isFavoriteBusy: boolean;
@@ -28,6 +30,8 @@ type PracticeQuestionProps = {
 export function PracticeQuestion({
   state,
   elapsedSeconds,
+  isCompleting,
+  isBlocked,
   onChangeAnswer,
   isFavorite,
   isFavoriteBusy,
@@ -100,6 +104,7 @@ export function PracticeQuestion({
                       : "下一题"
                   }
                   variant="primary"
+                  isLoading={isCompleting}
                   onClick={onContinue}
                 />
               </Stack>
@@ -111,6 +116,7 @@ export function PracticeQuestion({
                 label={expectsEnglish ? "英文答案" : "中文答案"}
                 value={state.answer}
                 onChange={onChangeAnswer}
+                isDisabled={isCompleting || isBlocked}
                 onEnter={onSubmit}
                 placeholder={
                   expectsEnglish ? "输入完整英文单词" : "输入完整中文释义"
@@ -144,10 +150,22 @@ export function PracticeQuestion({
                     }
                     variant="secondary"
                     onClick={onHint}
+                    isDisabled={isCompleting || isBlocked}
                   />
                 ) : null}
-                <Button label="跳过" variant="secondary" onClick={onSkip} />
-                <Button label="提交答案" variant="primary" onClick={onSubmit} />
+                <Button
+                  label="跳过"
+                  variant="secondary"
+                  isDisabled={isCompleting || isBlocked}
+                  onClick={onSkip}
+                />
+                <Button
+                  label="提交答案"
+                  variant="primary"
+                  isLoading={isCompleting}
+                  isDisabled={isBlocked}
+                  onClick={onSubmit}
+                />
               </Stack>
             </>
           )}

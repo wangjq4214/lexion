@@ -22,7 +22,6 @@ import {
 } from "./data/wordbooks";
 import {
   createEnglishHints,
-  createQuestions,
   getExpectedAnswer,
   isExactAnswer,
   type PracticeMode,
@@ -69,23 +68,35 @@ function getElapsedSeconds(startedAt: number, now: number) {
   return Math.max(0, Math.floor((now - startedAt) / 1_000));
 }
 
-async function waitForMistakeWrites(pending: Set<Promise<unknown>>) {
-  if (pending.size === 0) return;
+function newSubmissionId(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+async function withWriteTimeout<T>(
+  write: Promise<T>,
+  message: string,
+): Promise<T> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
-    await Promise.race([
-      Promise.allSettled([...pending]),
+    return await Promise.race([
+      write,
       new Promise<never>((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error("错题记录尚未完成，请稍后重试。")),
-          10_000,
-        );
+        timeout = setTimeout(() => reject(new Error(message)), 10_000);
       }),
     ]);
   } finally {
     if (timeout !== undefined) clearTimeout(timeout);
   }
 }
+
+type MistakeSubmission = {
+  id: string;
+  english: string;
+  chinese: string;
+};
 
 type AppProps = {
   random?: RandomSource;
@@ -113,8 +124,14 @@ function App({
   const [mistakeWriteError, setMistakeWriteError] = useState<string | null>(
     null,
   );
+  const [reviewWriteError, setReviewWriteError] = useState<string | null>(null);
+  const completingReview = useRef(false);
+  const pendingMistakeRef = useRef<MistakeSubmission | null>(null);
+  const savingMistakeRef = useRef(false);
+  const [pendingMistake, setPendingMistake] =
+    useState<MistakeSubmission | null>(null);
+  const [isSavingMistake, setIsSavingMistake] = useState(false);
   const mistakesRequest = useRef(0);
-  const pendingMistakeWrites = useRef(new Set<Promise<unknown>>());
   const [favoritesError, setFavoritesError] = useState<string | null>(null);
   const [favoriteWriteError, setFavoriteWriteError] = useState<string | null>(
     null,
@@ -139,6 +156,7 @@ function App({
   const [practiceError, setPracticeError] = useState<string | null>(null);
   const [isStarting, setIsStarting] = useState(false);
   const [countSelection, setCountSelection] = useState("10");
+  const [isCompleting, setIsCompleting] = useState(false);
   const [customCount, setCustomCount] = useState("");
   const practiceCount = parsePracticeCount(
     countSelection === "custom" ? customCount : countSelection,
@@ -322,7 +340,6 @@ function App({
     setShowMistakes(true);
     void (async () => {
       try {
-        await waitForMistakeWrites(pendingMistakeWrites.current);
         if (mistakesRequest.current !== request) return;
         const entries = await wordbookService.listMistakes();
         if (mistakesRequest.current === request) setMistakes(entries);
@@ -355,19 +372,14 @@ function App({
       return;
     setIsStarting(true);
     setPracticeError(null);
+    setReviewWriteError(null);
     try {
-      if (practiceSource === "mistakes") {
-        await waitForMistakeWrites(pendingMistakeWrites.current);
-      }
-      const entries =
-        practiceSource === "favorites"
-          ? await wordbookService.sampleFavorites(practiceCount)
-          : practiceSource === "mistakes"
-            ? await wordbookService.sampleMistakes(practiceCount)
-            : await wordbookService.sampleWordbook(
-                activeWordbookId,
-                practiceCount,
-              );
+      const entries = await wordbookService.schedulePractice({
+        source: practiceSource,
+        wordbookId: practiceSource === "wordbook" ? activeWordbookId : null,
+        limit: practiceCount,
+        mode,
+      });
       if (entries.length === 0) {
         setPracticeError(
           practiceSource === "favorites"
@@ -384,7 +396,12 @@ function App({
       dispatch({
         type: "start",
         mode,
-        questions: createQuestions(entries, mode, random),
+        questions: entries.map(({ reviewId, entry, direction }) => ({
+          id: String(reviewId),
+          reviewId,
+          entry,
+          direction,
+        })),
       });
     } catch (caught) {
       setPracticeError(
@@ -395,30 +412,94 @@ function App({
     }
   };
 
-  const completeQuestion = (type: "submit-answer" | "continue-after-skip") => {
-    const currentElapsedSeconds =
-      roundStartedAt.current === null
-        ? elapsedSeconds
-        : getElapsedSeconds(roundStartedAt.current, now());
-    setElapsedSeconds(currentElapsedSeconds);
-    dispatch({ type, elapsedSeconds: currentElapsedSeconds });
+  const saveMistake = async (submission: MistakeSubmission) => {
+    if (savingMistakeRef.current) return;
+    savingMistakeRef.current = true;
+    setIsSavingMistake(true);
+    setMistakeWriteError(null);
+    const write = wordbookService.recordMistakeOnce(
+      submission.english,
+      submission.chinese,
+      submission.id,
+    );
+    try {
+      await withWriteTimeout(write, "错题记录尚未完成，请稍后重试。");
+      pendingMistakeRef.current = null;
+      setPendingMistake(null);
+      dispatch({ type: "submit-answer", elapsedSeconds });
+    } catch (error) {
+      setMistakeWriteError(
+        `记录错题失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      savingMistakeRef.current = false;
+      setIsSavingMistake(false);
+    }
+  };
+
+  const completeQuestion = async (
+    type: "submit-answer" | "continue-after-skip",
+  ) => {
+    if (
+      state.phase !== "practice" ||
+      completingReview.current ||
+      pendingMistakeRef.current
+    )
+      return;
+    const question = state.questions[state.questionIndex];
+    if (question.reviewId === undefined) {
+      setReviewWriteError("复习记录缺少题目身份，请重新开始练习。");
+      return;
+    }
+    completingReview.current = true;
+    setReviewWriteError(null);
+    setIsCompleting(true);
+    try {
+      const currentElapsedSeconds =
+        roundStartedAt.current === null
+          ? elapsedSeconds
+          : getElapsedSeconds(roundStartedAt.current, now());
+      await withWriteTimeout(
+        wordbookService.completeReview({
+          reviewId: question.reviewId,
+          errorCount: state.questionErrorCount,
+          hintCount: state.questionHintCount,
+          skipped: type === "continue-after-skip",
+        }),
+        "复习进度尚未保存，请稍后重试。",
+      );
+      setElapsedSeconds(currentElapsedSeconds);
+      dispatch({ type, elapsedSeconds: currentElapsedSeconds });
+    } catch (error) {
+      setReviewWriteError(
+        `保存复习进度失败，请重试：${error instanceof Error ? error.message : String(error)}`,
+      );
+    } finally {
+      completingReview.current = false;
+      setIsCompleting(false);
+    }
   };
   const submitAnswer = () => {
-    if (state.phase !== "practice" || state.isAnswerRevealed) return;
+    if (
+      state.phase !== "practice" ||
+      state.isAnswerRevealed ||
+      completingReview.current ||
+      pendingMistakeRef.current
+    )
+      return;
     const question = state.questions[state.questionIndex];
     if (!isExactAnswer(state.answer, question)) {
-      const { english, chinese } = question.entry;
-      const write = wordbookService
-        .recordMistake(english, chinese)
-        .catch((error) => {
-          setMistakeWriteError(
-            `记录错题失败：${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
-      pendingMistakeWrites.current.add(write);
-      void write.finally(() => pendingMistakeWrites.current.delete(write));
+      const submission = {
+        id: newSubmissionId(),
+        english: question.entry.english,
+        chinese: question.entry.chinese,
+      };
+      pendingMistakeRef.current = submission;
+      setPendingMistake(submission);
+      void saveMistake(submission);
+      return;
     }
-    completeQuestion("submit-answer");
+    void completeQuestion("submit-answer");
   };
 
   let content: ReactNode;
@@ -503,23 +584,31 @@ function App({
       <PracticeQuestion
         state={state}
         elapsedSeconds={elapsedSeconds}
+        isCompleting={isCompleting}
+        isBlocked={pendingMistake !== null}
         isFavorite={isFavorite}
         isFavoriteBusy={isFavoriteBusy}
         favoriteError={favoriteError}
         onToggleFavorite={() => void toggleFavorite()}
         onRetryFavorite={() => setFavoriteRefresh((value) => value + 1)}
         onChangeAnswer={(answer) => dispatch({ type: "change-answer", answer })}
-        onHint={() =>
-          state.hintLevel === 0
-            ? dispatch({
-                type: "start-hints",
-                hints: createEnglishHints(getExpectedAnswer(question), random),
-              })
-            : dispatch({ type: "advance-hint" })
-        }
-        onSkip={() => dispatch({ type: "skip-question" })}
+        onHint={() => {
+          if (completingReview.current || pendingMistakeRef.current) return;
+          if (state.hintLevel === 0) {
+            dispatch({
+              type: "start-hints",
+              hints: createEnglishHints(getExpectedAnswer(question), random),
+            });
+          } else {
+            dispatch({ type: "advance-hint" });
+          }
+        }}
+        onSkip={() => {
+          if (!completingReview.current && !pendingMistakeRef.current)
+            dispatch({ type: "skip-question" });
+        }}
         onSubmit={submitAnswer}
-        onContinue={() => completeQuestion("continue-after-skip")}
+        onContinue={() => void completeQuestion("continue-after-skip")}
       />
     );
   } else {
@@ -556,12 +645,27 @@ function App({
               {mistakeWriteError ? (
                 <Stack gap={2}>
                   <Text role="alert">{mistakeWriteError}</Text>
-                  <Button
-                    label="关闭错题错误提示"
-                    variant="ghost"
-                    onClick={() => setMistakeWriteError(null)}
-                  />
+                  {pendingMistake ? (
+                    <Button
+                      label="重试保存错题"
+                      variant="secondary"
+                      isLoading={isSavingMistake}
+                      onClick={() => void saveMistake(pendingMistake)}
+                    />
+                  ) : (
+                    <Button
+                      label="关闭错题错误提示"
+                      variant="ghost"
+                      onClick={() => setMistakeWriteError(null)}
+                    />
+                  )}
                 </Stack>
+              ) : null}
+              {isSavingMistake ? (
+                <Text role="status">正在保存错题记录…</Text>
+              ) : null}
+              {reviewWriteError ? (
+                <Text role="alert">{reviewWriteError}</Text>
               ) : null}
               {content}
             </Stack>

@@ -27,6 +27,14 @@ pub struct MistakeEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ScheduledQuestion {
+    pub review_id: i64,
+    pub entry: WordEntry,
+    pub direction: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ImportResult {
     pub wordbook: WordbookSummary,
 }

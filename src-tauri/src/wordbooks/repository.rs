@@ -4,6 +4,9 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::model::{ImportedEntry, MistakeEntry, WordEntry, WordbookSummary};
 
+#[path = "schedule.rs"]
+mod schedule;
+
 #[derive(Debug)]
 pub enum RepositoryError {
     Conflict,
@@ -31,14 +34,15 @@ impl WordbookRepository {
         Ok(repository)
     }
 
-    fn connect(&self) -> Result<Connection, rusqlite::Error> {
+    pub(super) fn connect(&self) -> Result<Connection, rusqlite::Error> {
         let connection = Connection::open(&self.database_path)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(connection)
     }
 
     fn initialize(&self) -> Result<(), rusqlite::Error> {
-        self.connect()?.execute_batch(
+        let connection = self.connect()?;
+        connection.execute_batch(
             "CREATE TABLE IF NOT EXISTS wordbooks (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
@@ -67,7 +71,81 @@ impl WordbookRepository {
                 normalized_english TEXT NOT NULL,
                 error_count INTEGER NOT NULL DEFAULT 1 CHECK(error_count > 0),
                 UNIQUE(normalized_english, chinese)
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS mistake_submissions (
+                submission_id TEXT PRIMARY KEY NOT NULL CHECK(length(trim(submission_id)) > 0),
+                normalized_english TEXT NOT NULL,
+                chinese TEXT NOT NULL,
+                created_at INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS review_coverage (
+                source TEXT NOT NULL,
+                source_id INTEGER NOT NULL,
+                normalized_english TEXT NOT NULL,
+                chinese TEXT NOT NULL,
+                PRIMARY KEY(source, source_id, normalized_english, chinese)
+            );
+            CREATE TABLE IF NOT EXISTS review_memory (
+                normalized_english TEXT NOT NULL,
+                chinese TEXT NOT NULL,
+                direction TEXT NOT NULL CHECK(direction IN ('zh-to-en', 'en-to-zh')),
+                stability REAL NOT NULL CHECK(stability > 0),
+                last_reviewed REAL NOT NULL,
+                due_at REAL NOT NULL,
+                PRIMARY KEY(normalized_english, chinese, direction)
+            );
+            CREATE TABLE IF NOT EXISTS pending_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                normalized_english TEXT NOT NULL,
+                chinese TEXT NOT NULL,
+                direction TEXT NOT NULL CHECK(direction IN ('zh-to-en', 'en-to-zh')),
+                completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
+                created_at REAL NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS review_settings (
+                id INTEGER PRIMARY KEY CHECK(id = 1),
+                target_retention REAL NOT NULL CHECK(target_retention > 0 AND target_retention < 1)
+            );
+            INSERT OR IGNORE INTO review_settings(id, target_retention) VALUES (1, 0.9);",
+        )?;
+        let has_mistake_created_at: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('mistake_submissions') WHERE name = 'created_at')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_mistake_created_at {
+            connection.execute_batch(
+                "ALTER TABLE mistake_submissions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS mistake_submissions_created_at ON mistake_submissions(created_at);",
+        )?;
+        let has_created_at: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('pending_reviews') WHERE name = 'created_at')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_created_at {
+            connection.execute_batch(
+                "BEGIN;
+                 CREATE TABLE pending_reviews_new (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   normalized_english TEXT NOT NULL,
+                   chinese TEXT NOT NULL,
+                   direction TEXT NOT NULL CHECK(direction IN ('zh-to-en', 'en-to-zh')),
+                   completed INTEGER NOT NULL DEFAULT 0 CHECK(completed IN (0, 1)),
+                   created_at REAL NOT NULL DEFAULT 0
+                 );
+                 INSERT INTO pending_reviews_new(id, normalized_english, chinese, direction, completed)
+                   SELECT id, normalized_english, chinese, direction, completed FROM pending_reviews;
+                 DROP TABLE pending_reviews;
+                 ALTER TABLE pending_reviews_new RENAME TO pending_reviews;
+                 COMMIT;",
+            )?;
+        }
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS pending_reviews_created_at ON pending_reviews(created_at);",
         )?;
         Ok(())
     }
@@ -110,6 +188,10 @@ impl WordbookRepository {
         }
 
         if let Some(id) = existing_id {
+            transaction.execute(
+                "DELETE FROM review_coverage WHERE source = 'wordbook' AND source_id = ?1",
+                [id],
+            )?;
             transaction.execute("DELETE FROM wordbooks WHERE id = ?1", [id])?;
         }
 
@@ -163,11 +245,20 @@ impl WordbookRepository {
 
     pub fn remove_favorite(&self, english: &str, chinese: &str) -> Result<bool, RepositoryError> {
         let (english, chinese) = favorite_pair(english, chinese)?;
-        let connection = self.connect()?;
-        Ok(connection.execute(
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let removed = transaction.execute(
             "DELETE FROM favorites WHERE normalized_english = ?1 AND chinese = ?2",
             params![english.to_lowercase(), chinese],
-        )? != 0)
+        )? != 0;
+        if removed {
+            transaction.execute(
+                "DELETE FROM review_coverage WHERE source = 'favorites' AND normalized_english = ?1 AND chinese = ?2",
+                params![english.to_lowercase(), chinese],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(removed)
     }
 
     pub fn is_favorite(&self, english: &str, chinese: &str) -> Result<bool, RepositoryError> {
@@ -216,6 +307,59 @@ impl WordbookRepository {
             params![english, chinese, english.to_lowercase()],
             mistake_entry,
         )?)
+    }
+
+    pub fn record_mistake_once(
+        &self,
+        english: &str,
+        chinese: &str,
+        submission_id: &str,
+    ) -> Result<MistakeEntry, RepositoryError> {
+        let (english, chinese) = favorite_pair(english, chinese)?;
+        if submission_id.trim().is_empty() {
+            return Err(RepositoryError::Validation("提交 ID 不能为空"));
+        }
+        let normalized_english = english.to_lowercase();
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        // The UI keeps retry IDs only for the active question; bound stale idempotency claims.
+        transaction.execute(
+            "DELETE FROM mistake_submissions WHERE created_at < unixepoch() - 2592000",
+            [],
+        )?;
+        // Claim the ID before updating the count. SQLite serializes writers, so concurrent
+        // retries cannot both increment, and a failed UPSERT rolls back the claim as well.
+        let claimed = transaction.execute(
+            "INSERT OR IGNORE INTO mistake_submissions(submission_id, normalized_english, chinese, created_at)
+             VALUES (?1, ?2, ?3, unixepoch())",
+            params![submission_id, normalized_english, chinese],
+        )? != 0;
+        if claimed {
+            transaction.execute(
+                "INSERT INTO mistakes(english, chinese, normalized_english, error_count)
+                 VALUES (?1, ?2, ?3, 1)
+                 ON CONFLICT(normalized_english, chinese)
+                 DO UPDATE SET error_count = error_count + 1",
+                params![english, chinese, normalized_english],
+            )?;
+        } else {
+            let stored_pair: (String, String) = transaction.query_row(
+                "SELECT normalized_english, chinese FROM mistake_submissions WHERE submission_id = ?1",
+                [submission_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if stored_pair != (normalized_english.clone(), chinese.to_owned()) {
+                return Err(RepositoryError::Conflict);
+            }
+        }
+        let entry = transaction.query_row(
+            "SELECT id, english, chinese, error_count FROM mistakes
+             WHERE normalized_english = ?1 AND chinese = ?2",
+            params![normalized_english, chinese],
+            mistake_entry,
+        )?;
+        transaction.commit()?;
+        Ok(entry)
     }
 
     pub fn list_mistakes(&self) -> Result<Vec<MistakeEntry>, rusqlite::Error> {
@@ -579,6 +723,169 @@ mod tests {
                 sample.len()
             );
         }
+    }
+
+    #[test]
+    fn submission_ids_survive_reopening_and_increment_only_for_new_submissions() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("words.sqlite");
+        let repository = WordbookRepository::open(&path).unwrap();
+        let first = repository
+            .record_mistake_once(" Apple ", " 苹果 ", "submission-1")
+            .unwrap();
+        assert_eq!(first.error_count, 1);
+        assert_eq!(
+            repository
+                .record_mistake_once("apple", "苹果", "submission-1")
+                .unwrap(),
+            first
+        );
+        drop(repository);
+
+        let reopened = WordbookRepository::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .record_mistake_once("APPLE", "苹果", "submission-1")
+                .unwrap(),
+            first
+        );
+        let second = reopened
+            .record_mistake_once("apple", "苹果", "submission-2")
+            .unwrap();
+        assert_eq!(second.id, first.id);
+        assert_eq!(second.error_count, 2);
+        assert_eq!(second.english, first.english);
+        assert_eq!(reopened.list_mistakes().unwrap(), vec![second.clone()]);
+        assert_eq!(
+            reopened
+                .record_mistake_once("apple", "苹果", "submission-1")
+                .unwrap(),
+            second
+        );
+    }
+
+    #[test]
+    fn expires_old_submission_claims_without_discarding_mistake_counts() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("words.sqlite");
+        let repository = WordbookRepository::open(&path).unwrap();
+        repository
+            .record_mistake_once("apple", "苹果", "old")
+            .unwrap();
+        repository
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE mistake_submissions SET created_at = 0 WHERE submission_id = 'old'",
+                [],
+            )
+            .unwrap();
+        repository
+            .record_mistake_once("apple", "苹果", "new")
+            .unwrap();
+        let remaining: i64 = repository
+            .connect()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM mistake_submissions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(repository.list_mistakes().unwrap()[0].error_count, 2);
+        drop(repository);
+        let reopened = WordbookRepository::open(path).unwrap();
+        assert_eq!(reopened.list_mistakes().unwrap()[0].error_count, 2);
+    }
+
+    #[test]
+    fn concurrent_retries_claim_one_submission() {
+        use std::sync::{Arc, Barrier};
+
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        let barrier = Arc::new(Barrier::new(8));
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let repository = repository.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    repository.record_mistake_once("word", "释义", "one-id")
+                })
+            })
+            .collect();
+        for handle in handles {
+            assert_eq!(handle.join().unwrap().unwrap().error_count, 1);
+        }
+        assert_eq!(repository.list_mistakes().unwrap()[0].error_count, 1);
+    }
+
+    #[test]
+    fn submission_ids_reject_invalid_input_and_pair_reuse_without_writes() {
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        for (english, chinese, id) in [
+            (" ", "释义", "valid"),
+            ("word", " ", "valid"),
+            ("word", "释义", " \t "),
+        ] {
+            assert!(matches!(
+                repository.record_mistake_once(english, chinese, id),
+                Err(RepositoryError::Validation(_))
+            ));
+        }
+        assert!(repository.list_mistakes().unwrap().is_empty());
+        let first = repository
+            .record_mistake_once("word", "释义", "valid")
+            .unwrap();
+        for (english, chinese) in [("other", "释义"), ("word", "其他")] {
+            assert!(matches!(
+                repository.record_mistake_once(english, chinese, "valid"),
+                Err(RepositoryError::Conflict)
+            ));
+        }
+        assert_eq!(repository.list_mistakes().unwrap(), vec![first]);
+    }
+
+    #[test]
+    fn old_mistake_database_upgrades_and_legacy_recording_still_increments() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("words.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE mistakes (
+                    id INTEGER PRIMARY KEY,
+                    english TEXT NOT NULL,
+                    chinese TEXT NOT NULL,
+                    normalized_english TEXT NOT NULL,
+                    error_count INTEGER NOT NULL,
+                    UNIQUE(normalized_english, chinese)
+                );
+                INSERT INTO mistakes(english, chinese, normalized_english, error_count)
+                VALUES ('Apple', '苹果', 'apple', 2);",
+            )
+            .unwrap();
+        drop(connection);
+        let repository = WordbookRepository::open(&path).unwrap();
+        let once = repository
+            .record_mistake_once("apple", "苹果", "new-id")
+            .unwrap();
+        assert_eq!(once.error_count, 3);
+        assert_eq!(
+            repository
+                .record_mistake("APPLE", "苹果")
+                .unwrap()
+                .error_count,
+            4
+        );
+        assert_eq!(
+            repository
+                .record_mistake_once("Apple", "苹果", "new-id")
+                .unwrap()
+                .error_count,
+            4
+        );
     }
 
     #[test]

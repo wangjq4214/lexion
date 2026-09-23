@@ -17,6 +17,8 @@ export type PracticeState = {
   answer: string;
   error: string | null;
   errorCount: number;
+  questionErrorCount: number;
+  questionHintCount: number;
   hintCount: number;
   correctCount: number;
   skippedCount: number;
@@ -68,6 +70,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       answer: "",
       error: null,
       errorCount: 0,
+      questionErrorCount: 0,
+      questionHintCount: 0,
       hintCount: 0,
       correctCount: 0,
       skippedCount: 0,
@@ -103,6 +107,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       hints: action.hints,
       hintLevel: 1,
       hintCount: state.hintCount + 1,
+      questionHintCount: state.questionHintCount + 1,
     };
   }
 
@@ -110,12 +115,18 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     if (state.isAnswerRevealed || !state.hints || state.hintLevel === 0)
       return state;
     if (state.hintLevel === 1) {
-      return { ...state, hintLevel: 2, hintCount: state.hintCount + 1 };
+      return {
+        ...state,
+        hintLevel: 2,
+        hintCount: state.hintCount + 1,
+        questionHintCount: state.questionHintCount + 1,
+      };
     }
     return {
       ...state,
       isAnswerRevealed: true,
       hintCount: state.hintCount + 1,
+      questionHintCount: state.questionHintCount + 1,
       skippedCount: state.skippedCount + 1,
     };
   }
@@ -144,6 +155,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
           ...state,
           error: "答案不完全匹配，请检查后重试。",
           errorCount: state.errorCount + 1,
+          questionErrorCount: state.questionErrorCount + 1,
         };
       }
     }
@@ -166,6 +178,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     return {
       ...state,
       correctCount,
+      questionErrorCount: 0,
+      questionHintCount: 0,
       questionIndex: state.questionIndex + 1,
       answer: "",
       error: null,

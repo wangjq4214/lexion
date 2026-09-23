@@ -5,7 +5,7 @@ mod repository;
 use serde::Serialize;
 use tauri::State;
 
-pub use model::{ImportResult, MistakeEntry, WordEntry, WordbookSummary};
+pub use model::{ImportResult, MistakeEntry, ScheduledQuestion, WordEntry, WordbookSummary};
 pub use repository::WordbookRepository;
 
 #[derive(Debug, Serialize)]
@@ -119,6 +119,18 @@ pub fn record_mistake(
 }
 
 #[tauri::command]
+pub fn record_mistake_once(
+    english: String,
+    chinese: String,
+    submission_id: String,
+    repository: State<'_, WordbookRepository>,
+) -> Result<MistakeEntry, CommandError> {
+    repository
+        .record_mistake_once(&english, &chinese, &submission_id)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
 pub fn list_mistakes(
     repository: State<'_, WordbookRepository>,
 ) -> Result<Vec<MistakeEntry>, CommandError> {
@@ -134,6 +146,47 @@ pub fn sample_mistakes(
 ) -> Result<Vec<WordEntry>, CommandError> {
     repository
         .sample_mistakes(limit)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
+pub fn review_target(repository: State<'_, WordbookRepository>) -> Result<f64, CommandError> {
+    repository.review_target().map_err(map_repository_error)
+}
+
+#[tauri::command]
+pub fn set_review_target(
+    target: f64,
+    repository: State<'_, WordbookRepository>,
+) -> Result<(), CommandError> {
+    repository
+        .set_review_target(target)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
+pub fn schedule_practice(
+    source: String,
+    wordbook_id: Option<i64>,
+    limit: u8,
+    mode: String,
+    repository: State<'_, WordbookRepository>,
+) -> Result<Vec<ScheduledQuestion>, CommandError> {
+    repository
+        .schedule_practice(&source, wordbook_id, limit, &mode)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
+pub fn complete_review(
+    review_id: i64,
+    error_count: u32,
+    hint_count: u8,
+    skipped: bool,
+    repository: State<'_, WordbookRepository>,
+) -> Result<(), CommandError> {
+    repository
+        .complete_review(review_id, error_count, hint_count, skipped)
         .map_err(map_repository_error)
 }
 

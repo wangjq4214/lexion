@@ -58,3 +58,18 @@
 - **Definition:** An English word and Chinese meaning pair with a cumulative error count. Each incorrect submission for this pair increments its count, including repeated incorrect submissions on the same question. A skip alone does not increment it. The pair remains available for review and practice after its source wordbook is replaced.
 - **Relationships:**
   - belongs to mistake-collection
+
+### review-schedule
+- **Definition:** A per-practice-source coverage schedule that selects words across rounds so eligible words are eventually drawn, while prioritizing due reviews and reserving places for words not yet drawn from that source. Each wordbook maintains its own coverage progress; the favorites collection and mistake collection each maintain separate coverage progress. An identical English-and-Chinese pair in these sources shares its memory stability and due time for the same question direction. A word is not repeated within a round. Mixed-mode scheduling fixes the question direction before assessing due status.
+- **Synonyms:** 复习调度
+- **Relationships:**
+  - depends on practice-source
+  - references vocabulary-entry
+  - references favorite-entry
+  - references mistake-entry
+
+### review-outcome
+- **Definition:** A completed practice question's result used to adjust that word's later review: only a first-attempt correct answer without hints counts as an unassisted success; a hint, an incorrect submission before a correct answer, or a skip prompts earlier review. More incorrect submissions or hint levels shorten the review interval. Mastery is tracked separately for Chinese-to-English and English-to-Chinese questions, but shared for an identical English-and-Chinese pair across practice sources in the same direction; distinct meanings remain distinct pairs. Initial scheduling predicts retention as R(t) = exp(-t / S), with per-pair, per-direction memory stability S updated by outcomes, and schedules review when retention reaches an adjustable target initially set at 90%. Update coefficients remain subject to testing and feedback; this is not a fixed day ladder.
+- **Relationships:**
+  - belongs to practice-round
+  - depends on review-schedule

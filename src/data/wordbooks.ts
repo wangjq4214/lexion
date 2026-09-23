@@ -3,6 +3,25 @@ import { open } from "@tauri-apps/plugin-dialog";
 import type { WordEntry } from "../domain/word";
 
 export type MistakeEntry = WordEntry & { errorCount: number };
+export type ScheduledQuestion = {
+  reviewId: number;
+  entry: WordEntry;
+  direction: "zh-to-en" | "en-to-zh";
+};
+
+export type ScheduleRequest = {
+  source: "wordbook" | "favorites" | "mistakes";
+  wordbookId: number | null;
+  limit: number;
+  mode: "zh-to-en" | "en-to-zh" | "mixed";
+};
+
+export type ReviewOutcome = {
+  reviewId: number;
+  errorCount: number;
+  hintCount: number;
+  skipped: boolean;
+};
 
 export type WordbookSummary = {
   id: number;
@@ -38,6 +57,10 @@ export class WordbookError extends Error {
 
 export type WordbookService = {
   pickWorkbookFile(): Promise<string | null>;
+  reviewTarget(): Promise<number>;
+  setReviewTarget(target: number): Promise<void>;
+  schedulePractice(request: ScheduleRequest): Promise<ScheduledQuestion[]>;
+  completeReview(outcome: ReviewOutcome): Promise<void>;
   listWordbooks(): Promise<WordbookSummary[]>;
   importWordbook(request: ImportWordbookRequest): Promise<ImportWordbookResult>;
   sampleWordbook(wordbookId: number, limit: number): Promise<WordEntry[]>;
@@ -47,6 +70,11 @@ export type WordbookService = {
   listFavorites(): Promise<WordEntry[]>;
   sampleFavorites(limit: number): Promise<WordEntry[]>;
   recordMistake(english: string, chinese: string): Promise<MistakeEntry>;
+  recordMistakeOnce(
+    english: string,
+    chinese: string,
+    submissionId: string,
+  ): Promise<MistakeEntry>;
   listMistakes(): Promise<MistakeEntry[]>;
   sampleMistakes(limit: number): Promise<WordEntry[]>;
 };
@@ -69,6 +97,28 @@ function commandError(error: unknown): WordbookError {
 }
 
 export const tauriWordbookService: WordbookService = {
+  reviewTarget() {
+    return invoke<number>("review_target").catch((error) => {
+      throw commandError(error);
+    });
+  },
+  setReviewTarget(target) {
+    return invoke<void>("set_review_target", { target }).catch((error) => {
+      throw commandError(error);
+    });
+  },
+  schedulePractice(request) {
+    return invoke<ScheduledQuestion[]>("schedule_practice", request).catch(
+      (error) => {
+        throw commandError(error);
+      },
+    );
+  },
+  completeReview(outcome) {
+    return invoke<void>("complete_review", outcome).catch((error) => {
+      throw commandError(error);
+    });
+  },
   async pickWorkbookFile() {
     const selected = await open({
       multiple: false,
@@ -136,6 +186,15 @@ export const tauriWordbookService: WordbookService = {
         throw commandError(error);
       },
     );
+  },
+  recordMistakeOnce(english, chinese, submissionId) {
+    return invoke<MistakeEntry>("record_mistake_once", {
+      english,
+      chinese,
+      submissionId,
+    }).catch((error) => {
+      throw commandError(error);
+    });
   },
   listMistakes() {
     return invoke<MistakeEntry[]>("list_mistakes").catch((error) => {

@@ -6,6 +6,10 @@ import { WordbookImportFlow } from "./WordbookImportFlow";
 
 function service(overrides?: Partial<WordbookService>): WordbookService {
   return {
+    reviewTarget: vi.fn(async () => 0.9),
+    setReviewTarget: vi.fn(async () => {}),
+    schedulePractice: vi.fn(async () => []),
+    completeReview: vi.fn(async () => {}),
     pickWorkbookFile: vi.fn(async () => "C:\\imports\\lesson.xls"),
     listWordbooks: vi.fn(async () => []),
     importWordbook: vi.fn(async (request) => ({
@@ -22,6 +26,12 @@ function service(overrides?: Partial<WordbookService>): WordbookService {
     listFavorites: vi.fn(async () => []),
     sampleFavorites: vi.fn(async () => []),
     recordMistake: vi.fn(async (english, chinese) => ({
+      id: 1,
+      english,
+      chinese,
+      errorCount: 1,
+    })),
+    recordMistakeOnce: vi.fn(async (english, chinese) => ({
       id: 1,
       english,
       chinese,
