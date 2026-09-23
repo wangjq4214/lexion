@@ -201,6 +201,114 @@ describe("App wordbook practice", () => {
     expect(screen.getByText("本轮用时：0:00")).toBeInTheDocument();
   });
 
+  it("reveals a skipped word and counts only answered questions", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 2 }],
+      samples: {
+        1: [
+          { id: 1, english: "apple", chinese: "苹果" },
+          { id: 2, english: "book", chinese: "书" },
+        ],
+      },
+    });
+    render(<App random={stableRandom} wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(screen.getByRole("button", { name: "跳过" }));
+    expect(screen.getByText("英文：apple")).toBeInTheDocument();
+    expect(screen.getByText("中文释义：苹果")).toBeInTheDocument();
+    expect(screen.getByText("0 / 2")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "跳过" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "提交答案" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "下一题" }));
+    await user.type(screen.getByLabelText("英文答案"), "book{Enter}");
+    expect(screen.getByText("答对题数：1 / 2")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
+    expect(screen.queryByText("英文：apple")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "再练一轮" }));
+    expect(
+      await screen.findByRole("button", { name: "跳过" }),
+    ).toBeInTheDocument();
+  });
+
+  it("reveals both sides in mixed mode and resets the skipped count for a new round", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    render(<App random={stableRandom} wordbookService={service} />);
+    await user.click(
+      await screen.findByRole("button", { name: "双向混合随机" }),
+    );
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    await user.click(screen.getByRole("button", { name: "跳过" }));
+    expect(screen.getByText("英文：apple")).toBeInTheDocument();
+    expect(screen.getByText("中文释义：苹果")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看练习结果" }));
+    expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "再练一轮" }));
+    await user.type(await screen.findByLabelText("中文答案"), "苹果{Enter}");
+    expect(screen.getByText("答对题数：1 / 1")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：0")).toBeInTheDocument();
+  });
+
+  it("skips the last reverse-mode question after an error", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    render(<App random={stableRandom} wordbookService={service} />);
+    await user.click(
+      await screen.findByRole("button", { name: "看英文拼中文" }),
+    );
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    await user.type(screen.getByLabelText("中文答案"), "错{Enter}");
+    await user.click(screen.getByRole("button", { name: "跳过" }));
+    expect(screen.getByText("英文：apple")).toBeInTheDocument();
+    expect(screen.getByText("中文释义：苹果")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "本轮练习完成" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看练习结果" }));
+    expect(screen.getByText("答对题数：0 / 1")).toBeInTheDocument();
+    expect(screen.getByText("错误次数：1")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
+  });
+
+  it("includes hint use and answer reveal time when all questions are skipped", async () => {
+    let now = 0;
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    render(
+      <App now={() => now} random={stableRandom} wordbookService={service} />,
+    );
+    const start = await screen.findByRole("button", { name: "开始练习" });
+    vi.useFakeTimers();
+    fireEvent.click(start);
+    await act(async () => undefined);
+    fireEvent.click(screen.getByRole("button", { name: "显示提示" }));
+    now = 5_000;
+    fireEvent.click(screen.getByRole("button", { name: "跳过" }));
+    now = 8_000;
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(screen.getByText("本轮用时：0:08")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "查看练习结果" }));
+    expect(screen.getByText("总用时：0:08")).toBeInTheDocument();
+    expect(screen.getByText("提示次数：1")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
+    now = 20_000;
+    act(() => vi.advanceTimersByTime(1_000));
+    expect(screen.getByText("总用时：0:08")).toBeInTheDocument();
+  });
+
   it("finalizes the current elapsed time when the submit button is used", async () => {
     let now = 0;
     const service = createService({

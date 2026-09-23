@@ -70,6 +70,9 @@ type PracticeState = {
   error: string | null;
   errorCount: number;
   hintCount: number;
+  correctCount: number;
+  skippedCount: number;
+  isAnswerRevealed: boolean;
   hint: string | null;
 };
 
@@ -80,6 +83,7 @@ type SummaryState = {
   totalCount: number;
   errorCount: number;
   hintCount: number;
+  skippedCount: number;
   elapsedSeconds: number;
 };
 
@@ -91,6 +95,8 @@ type AppAction =
   | { type: "change-answer"; answer: string }
   | { type: "submit-answer"; elapsedSeconds: number }
   | { type: "reveal-hint"; hint: string }
+  | { type: "skip-question" }
+  | { type: "continue-after-skip"; elapsedSeconds: number }
   | { type: "back-to-setup" };
 
 const initialState: AppState = {
@@ -113,6 +119,9 @@ function appReducer(state: AppState, action: AppAction): AppState {
       error: null,
       errorCount: 0,
       hintCount: 0,
+      correctCount: 0,
+      skippedCount: 0,
+      isAnswerRevealed: false,
       hint: null,
     };
   }
@@ -126,42 +135,67 @@ function appReducer(state: AppState, action: AppAction): AppState {
   }
 
   if (action.type === "change-answer") {
-    return { ...state, answer: action.answer, error: null };
+    return state.isAnswerRevealed
+      ? state
+      : { ...state, answer: action.answer, error: null };
   }
 
   if (action.type === "reveal-hint") {
-    if (state.hint !== null) return state;
+    if (state.isAnswerRevealed || state.hint !== null) return state;
     return { ...state, hint: action.hint, hintCount: state.hintCount + 1 };
   }
 
-  if (action.type === "submit-answer") {
-    const currentQuestion = state.questions[state.questionIndex];
-    if (!isExactAnswer(state.answer, currentQuestion)) {
-      return {
-        ...state,
-        error: "答案不完全匹配，请检查后重试。",
-        errorCount: state.errorCount + 1,
-      };
+  if (action.type === "skip-question") {
+    return state.isAnswerRevealed
+      ? state
+      : {
+          ...state,
+          isAnswerRevealed: true,
+          skippedCount: state.skippedCount + 1,
+        };
+  }
+
+  if (
+    action.type === "submit-answer" ||
+    action.type === "continue-after-skip"
+  ) {
+    if (action.type === "continue-after-skip" && !state.isAnswerRevealed)
+      return state;
+    if (action.type === "submit-answer") {
+      if (state.isAnswerRevealed) return state;
+      const currentQuestion = state.questions[state.questionIndex];
+      if (!isExactAnswer(state.answer, currentQuestion)) {
+        return {
+          ...state,
+          error: "答案不完全匹配，请检查后重试。",
+          errorCount: state.errorCount + 1,
+        };
+      }
     }
 
+    const correctCount =
+      state.correctCount + (action.type === "submit-answer" ? 1 : 0);
     if (state.questionIndex === state.questions.length - 1) {
       return {
         phase: "summary",
         mode: state.mode,
-        correctCount: state.questions.length,
+        correctCount,
         totalCount: state.questions.length,
         errorCount: state.errorCount,
         elapsedSeconds: action.elapsedSeconds,
         hintCount: state.hintCount,
+        skippedCount: state.skippedCount,
       };
     }
 
     return {
       ...state,
+      correctCount,
       questionIndex: state.questionIndex + 1,
       answer: "",
       error: null,
       hint: null,
+      isAnswerRevealed: false,
     };
   }
 
@@ -300,17 +334,15 @@ function App({
     }
   };
 
-  const submitAnswer = () => {
+  const completeQuestion = (type: "submit-answer" | "continue-after-skip") => {
     const currentElapsedSeconds =
       roundStartedAt.current === null
         ? elapsedSeconds
         : getElapsedSeconds(roundStartedAt.current, now());
     setElapsedSeconds(currentElapsedSeconds);
-    dispatch({
-      type: "submit-answer",
-      elapsedSeconds: currentElapsedSeconds,
-    });
+    dispatch({ type, elapsedSeconds: currentElapsedSeconds });
   };
+  const submitAnswer = () => completeQuestion("submit-answer");
 
   let content: ReactNode;
 
@@ -423,55 +455,83 @@ function App({
               </Text>
               <Heading level={1}>{getQuestionPrompt(question)}</Heading>
             </Stack>
-            <TextInput
-              key={question.id}
-              label={expectsEnglish ? "英文答案" : "中文答案"}
-              value={state.answer}
-              onChange={(answer) => dispatch({ type: "change-answer", answer })}
-              onEnter={submitAnswer}
-              placeholder={
-                expectsEnglish ? "输入完整英文单词" : "输入完整中文释义"
-              }
-              status={
-                state.error
-                  ? { type: "error", message: state.error }
-                  : undefined
-              }
-              statusVariant="detached"
-              hasAutoFocus
-              width="100%"
-            />
-            {state.hint ? (
-              <Stack gap={1} role="status" aria-live="polite">
-                <Text type="supporting">拼写提示</Text>
-                <Text type="code" weight="semibold">
-                  {state.hint}
-                </Text>
+            {state.isAnswerRevealed ? (
+              <Stack gap={2} role="status" aria-live="polite">
+                <Text type="supporting">本题答案</Text>
+                <Text>英文：{question.entry.english}</Text>
+                <Text>中文释义：{question.entry.chinese}</Text>
+                <Stack direction="horizontal" gap={3} justify="end">
+                  <Button
+                    label={
+                      state.questionIndex === state.questions.length - 1
+                        ? "查看练习结果"
+                        : "下一题"
+                    }
+                    variant="primary"
+                    onClick={() => completeQuestion("continue-after-skip")}
+                  />
+                </Stack>
               </Stack>
-            ) : null}
-            <Stack direction="horizontal" gap={3} wrap="wrap" justify="end">
-              {expectsEnglish ? (
-                <Button
-                  label={state.hint ? "提示已显示" : "显示提示"}
-                  variant="secondary"
-                  isDisabled={state.hint !== null}
-                  onClick={() =>
-                    dispatch({
-                      type: "reveal-hint",
-                      hint: createEnglishHint(
-                        getExpectedAnswer(question),
-                        random,
-                      ),
-                    })
+            ) : (
+              <>
+                <TextInput
+                  key={question.id}
+                  label={expectsEnglish ? "英文答案" : "中文答案"}
+                  value={state.answer}
+                  onChange={(answer) =>
+                    dispatch({ type: "change-answer", answer })
                   }
+                  onEnter={submitAnswer}
+                  placeholder={
+                    expectsEnglish ? "输入完整英文单词" : "输入完整中文释义"
+                  }
+                  status={
+                    state.error
+                      ? { type: "error", message: state.error }
+                      : undefined
+                  }
+                  statusVariant="detached"
+                  hasAutoFocus
+                  width="100%"
                 />
-              ) : null}
-              <Button
-                label="提交答案"
-                variant="primary"
-                onClick={submitAnswer}
-              />
-            </Stack>
+                {state.hint ? (
+                  <Stack gap={1} role="status" aria-live="polite">
+                    <Text type="supporting">拼写提示</Text>
+                    <Text type="code" weight="semibold">
+                      {state.hint}
+                    </Text>
+                  </Stack>
+                ) : null}
+                <Stack direction="horizontal" gap={3} wrap="wrap" justify="end">
+                  {expectsEnglish ? (
+                    <Button
+                      label={state.hint ? "提示已显示" : "显示提示"}
+                      variant="secondary"
+                      isDisabled={state.hint !== null}
+                      onClick={() =>
+                        dispatch({
+                          type: "reveal-hint",
+                          hint: createEnglishHint(
+                            getExpectedAnswer(question),
+                            random,
+                          ),
+                        })
+                      }
+                    />
+                  ) : null}
+                  <Button
+                    label="跳过"
+                    variant="secondary"
+                    onClick={() => dispatch({ type: "skip-question" })}
+                  />
+                  <Button
+                    label="提交答案"
+                    variant="primary"
+                    onClick={submitAnswer}
+                  />
+                </Stack>
+              </>
+            )}
           </Stack>
         </Section>
       </Stack>
@@ -492,6 +552,7 @@ function App({
               </Text>
               <Text>错误次数：{state.errorCount}</Text>
               <Text>提示次数：{state.hintCount}</Text>
+              <Text>跳过次数：{state.skippedCount}</Text>
               <Text>总用时：{formatElapsedTime(state.elapsedSeconds)}</Text>
             </Stack>
             {practiceError ? <Text role="alert">{practiceError}</Text> : null}

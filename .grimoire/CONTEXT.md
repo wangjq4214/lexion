@@ -18,7 +18,7 @@
   - references wordbook
 
 ### practice-round
-- **Definition:** One complete vocabulary practice session created after the user starts practice, covering all sampled questions. Its elapsed time starts when the first question is shown, accumulates across every question including retries and hint use, stops when the final question is answered correctly, and is displayed during practice and in the completion summary in minutes and seconds.
+- **Definition:** One complete vocabulary practice session created after the user starts practice, covering all sampled questions. A question is completed by answering correctly or skipping it; skipping reveals the English word and Chinese meaning, does not count as correct, and advances after the learner has seen the answer. Its elapsed time starts when the first question is shown, accumulates across questions including retries, hint use, and skips, and stops when the last question is completed. The completion summary displays minutes and seconds, correct answers, error count, hint count, and skip count, but does not list skipped words.
 - **Relationships:**
   - depends on active-wordbook
   - contains vocabulary-entry
