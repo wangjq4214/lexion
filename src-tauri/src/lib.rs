@@ -20,7 +20,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             wordbooks::list_wordbooks,
             wordbooks::import_wordbook,
-            wordbooks::sample_wordbook
+            wordbooks::sample_wordbook,
+            wordbooks::add_favorite,
+            wordbooks::remove_favorite,
+            wordbooks::is_favorite,
+            wordbooks::list_favorites,
+            wordbooks::sample_favorites
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

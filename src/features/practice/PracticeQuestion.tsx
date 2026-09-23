@@ -5,6 +5,7 @@ import { Section } from "@astryxdesign/core/Section";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
+import { ToggleButton } from "@astryxdesign/core/ToggleButton";
 import { getQuestionPrompt } from "../../domain/practice";
 import type { PracticeState } from "./practiceReducer";
 import { formatElapsedTime, modeLabels } from "./presentation";
@@ -13,6 +14,11 @@ type PracticeQuestionProps = {
   state: PracticeState;
   elapsedSeconds: number;
   onChangeAnswer: (answer: string) => void;
+  isFavorite: boolean | null;
+  isFavoriteBusy: boolean;
+  favoriteError: string | null;
+  onToggleFavorite: () => void;
+  onRetryFavorite: () => void;
   onHint: () => void;
   onSkip: () => void;
   onSubmit: () => void;
@@ -23,6 +29,11 @@ export function PracticeQuestion({
   state,
   elapsedSeconds,
   onChangeAnswer,
+  isFavorite,
+  isFavoriteBusy,
+  favoriteError,
+  onToggleFavorite,
+  onRetryFavorite,
   onHint,
   onSkip,
   onSubmit,
@@ -32,27 +43,50 @@ export function PracticeQuestion({
   const expectsEnglish = question.direction === "zh-to-en";
   return (
     <Stack gap={6}>
-      <Stack gap={2}>
-        <Text color="secondary">{modeLabels[state.mode]}</Text>
-        <ProgressBar
-          label={`练习进度：第 ${state.questionIndex + 1} 题，共 ${state.questions.length} 题`}
-          value={state.questionIndex}
-          max={state.questions.length}
-          hasValueLabel
-          formatValueLabel={(value, max) => `${value} / ${max}`}
-        />
-        <Text color="secondary">
-          本轮用时：{formatElapsedTime(elapsedSeconds)}
-        </Text>
-      </Stack>
+      <Section paddingBlockStart={6} paddingBlockEnd={0}>
+        <Stack gap={2}>
+          <Text color="secondary">{modeLabels[state.mode]}</Text>
+          <ProgressBar
+            label={`练习进度：第 ${state.questionIndex + 1} 题，共 ${state.questions.length} 题`}
+            value={state.questionIndex}
+            max={state.questions.length}
+            hasValueLabel
+            formatValueLabel={(value, max) => `${value} / ${max}`}
+          />
+          <Text color="secondary">
+            本轮用时：{formatElapsedTime(elapsedSeconds)}
+          </Text>
+        </Stack>
+      </Section>
       <Section>
         <Stack gap={6}>
           <Stack gap={2}>
             <Text color="secondary">
               {expectsEnglish ? "请拼写对应的英文" : "请输入对应的中文"}
             </Text>
-            <Heading level={1}>{getQuestionPrompt(question)}</Heading>
+            <Stack direction="horizontal" gap={2} align="center">
+              <Heading level={1}>{getQuestionPrompt(question)}</Heading>
+              <ToggleButton
+                label={isFavorite ? "取消收藏" : "收藏这个单词"}
+                icon={<Text color="secondary">☆</Text>}
+                pressedIcon={<Text color="accent">★</Text>}
+                isPressed={isFavorite === true}
+                size="sm"
+                isIconOnly
+                isLoading={isFavoriteBusy}
+                isDisabled={isFavorite === null}
+                onPressedChange={onToggleFavorite}
+              />
+            </Stack>
           </Stack>
+          {favoriteError ? <Text role="alert">{favoriteError}</Text> : null}
+          {favoriteError && isFavorite === null ? (
+            <Button
+              label="重试收藏状态"
+              variant="ghost"
+              onClick={onRetryFavorite}
+            />
+          ) : null}
           {state.isAnswerRevealed ? (
             <Stack gap={2} role="status" aria-live="polite">
               <Text type="supporting">本题答案</Text>

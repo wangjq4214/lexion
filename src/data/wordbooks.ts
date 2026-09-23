@@ -39,6 +39,11 @@ export type WordbookService = {
   listWordbooks(): Promise<WordbookSummary[]>;
   importWordbook(request: ImportWordbookRequest): Promise<ImportWordbookResult>;
   sampleWordbook(wordbookId: number, limit: number): Promise<WordEntry[]>;
+  addFavorite(english: string, chinese: string): Promise<WordEntry>;
+  removeFavorite(english: string, chinese: string): Promise<boolean>;
+  isFavorite(english: string, chinese: string): Promise<boolean>;
+  listFavorites(): Promise<WordEntry[]>;
+  sampleFavorites(limit: number): Promise<WordEntry[]>;
 };
 
 function commandError(error: unknown): WordbookError {
@@ -88,6 +93,37 @@ export const tauriWordbookService: WordbookService = {
         throw commandError(error);
       },
     );
+  },
+  addFavorite(english, chinese) {
+    return invoke<WordEntry>("add_favorite", { english, chinese }).catch(
+      (error) => {
+        throw commandError(error);
+      },
+    );
+  },
+  removeFavorite(english, chinese) {
+    return invoke<boolean>("remove_favorite", { english, chinese }).catch(
+      (error) => {
+        throw commandError(error);
+      },
+    );
+  },
+  isFavorite(english, chinese) {
+    return invoke<boolean>("is_favorite", { english, chinese }).catch(
+      (error) => {
+        throw commandError(error);
+      },
+    );
+  },
+  listFavorites() {
+    return invoke<WordEntry[]>("list_favorites").catch((error) => {
+      throw commandError(error);
+    });
+  },
+  sampleFavorites(limit) {
+    return invoke<WordEntry[]>("sample_favorites", { limit }).catch((error) => {
+      throw commandError(error);
+    });
   },
 };
 

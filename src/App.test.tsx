@@ -21,9 +21,11 @@ function createService(options?: {
   wordbooks?: WordbookSummary[];
   samples?: Record<number, WordEntry[]>;
   selectedPath?: string | null;
+  favorites?: WordEntry[];
 }) {
   let wordbooks = options?.wordbooks ?? [];
   const samples = options?.samples ?? {};
+  let favorites = [...(options?.favorites ?? [])];
   const service: WordbookService = {
     pickWorkbookFile: vi.fn(async () => options?.selectedPath ?? null),
     listWordbooks: vi.fn(async () => wordbooks),
@@ -39,6 +41,31 @@ function createService(options?: {
     sampleWordbook: vi.fn(
       async (wordbookId: number) => samples[wordbookId] ?? [],
     ),
+    addFavorite: vi.fn(async (english: string, chinese: string) => {
+      const existing = favorites.find(
+        (entry) => entry.english === english && entry.chinese === chinese,
+      );
+      if (existing) return existing;
+      const added = { id: 101 + favorites.length, english, chinese };
+      favorites = [...favorites, added];
+      return added;
+    }),
+    removeFavorite: vi.fn(async (english: string, chinese: string) => {
+      const existed = favorites.some(
+        (entry) => entry.english === english && entry.chinese === chinese,
+      );
+      favorites = favorites.filter(
+        (entry) => entry.english !== english || entry.chinese !== chinese,
+      );
+      return existed;
+    }),
+    isFavorite: vi.fn(async (english: string, chinese: string) =>
+      favorites.some(
+        (entry) => entry.english === english && entry.chinese === chinese,
+      ),
+    ),
+    listFavorites: vi.fn(async () => [...favorites]),
+    sampleFavorites: vi.fn(async (limit: number) => favorites.slice(0, limit)),
   };
   return service;
 }
@@ -517,5 +544,346 @@ describe("App wordbook practice", () => {
     fireEvent.click(screen.getByRole("button", { name: "提交答案" }));
 
     expect(screen.getByText("总用时：0:01")).toBeInTheDocument();
+  });
+
+  it("adds and removes the current pair even after skip reveals its answer", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    const prompt = await screen.findByRole("heading", { name: "苹果" });
+    const star = await screen.findByRole("button", { name: "收藏这个单词" });
+    expect(prompt.parentElement).toContainElement(star);
+    expect(star).toHaveAttribute("aria-pressed", "false");
+    expect(star).toHaveTextContent("☆");
+    await user.click(
+      await screen.findByRole("button", { name: "收藏这个单词" }),
+    );
+    expect(service.addFavorite).toHaveBeenCalledWith("apple", "苹果");
+    expect((await screen.findAllByText("已收藏")).length).toBeGreaterThan(0);
+    expect(screen.getByRole("button", { name: "取消收藏" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: "取消收藏" })).toHaveTextContent(
+      "★",
+    );
+    await user.click(screen.getByRole("button", { name: "跳过" }));
+    expect(screen.getByText("英文：apple")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "取消收藏" }));
+    expect(service.removeFavorite).toHaveBeenCalledWith("apple", "苹果");
+    expect((await screen.findAllByText("已取消")).length).toBeGreaterThan(0);
+    expect(
+      await screen.findByRole("button", { name: "收藏这个单词" }),
+    ).toBeEnabled();
+  });
+
+  it("lists saved pairs, preserves a failed removal, and removes a pair on retry", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      favorites: [{ id: 7, english: "apple", chinese: "苹果" }],
+    });
+    vi.mocked(service.removeFavorite).mockRejectedValueOnce(
+      new Error("删除失败"),
+    );
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "查看收藏夹" }));
+    expect(await screen.findByText("苹果")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "移除 apple：苹果" }));
+    expect(await screen.findByText("删除失败")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(screen.getByText("苹果")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "移除 apple：苹果" }));
+    expect(service.removeFavorite).toHaveBeenLastCalledWith("apple", "苹果");
+    expect(
+      await screen.findByText("收藏夹还没有单词。练习时可以收藏当前单词。"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回练习设置" }));
+    expect(
+      screen.getByRole("heading", { name: "练习设置" }),
+    ).toBeInTheDocument();
+  });
+
+  it("practices favorites with the selected count and resamples the same source on restart", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 30 }],
+      favorites: [{ id: 7, english: "apple", chinese: "苹果" }],
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByLabelText("练习来源"));
+    await user.click(await screen.findByRole("option", { name: "收藏夹" }));
+    expect(screen.getByLabelText("当前单词本")).toBeDisabled();
+    await user.click(screen.getByLabelText("本轮单词数"));
+    await user.click(await screen.findByRole("option", { name: "20 个单词" }));
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    expect(service.sampleFavorites).toHaveBeenCalledWith(20);
+    expect(service.sampleWordbook).not.toHaveBeenCalled();
+    expect(await screen.findByText("0 / 1")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("英文答案"), "apple{Enter}");
+    expect(screen.getByText("答对题数：1 / 1")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "再练一轮" }));
+    expect(service.sampleFavorites).toHaveBeenCalledTimes(2);
+    expect(service.sampleFavorites).toHaveBeenLastCalledWith(20);
+    expect(
+      await screen.findByRole("heading", { name: "苹果" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps an empty or failed favorites sample on setup with a clear error", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByLabelText("练习来源"));
+    await user.click(await screen.findByRole("option", { name: "收藏夹" }));
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    expect(
+      await screen.findByText("收藏夹还没有可练习的单词。"),
+    ).toHaveAttribute("role", "alert");
+    expect(screen.queryByLabelText("英文答案")).not.toBeInTheDocument();
+    vi.mocked(service.sampleFavorites).mockRejectedValueOnce(
+      new Error("抽样失败"),
+    );
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    expect(await screen.findByText("抽样失败")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(
+      screen.getByRole("heading", { name: "练习设置" }),
+    ).toBeInTheDocument();
+  });
+
+  it("reads saved pairs again after remount and replacement of the original wordbook entry", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    const view = render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(
+      await screen.findByRole("button", { name: "收藏这个单词" }),
+    );
+    await screen.findByRole("button", { name: "取消收藏" });
+    view.unmount();
+    // The service models persistent storage; the replacement gives the same pair a new entry ID.
+    vi.mocked(service.sampleWordbook).mockResolvedValue([
+      { id: 999, english: "apple", chinese: "苹果" },
+    ]);
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "查看收藏夹" }));
+    expect(await screen.findByText("苹果")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回练习设置" }));
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    expect(
+      await screen.findByRole("button", { name: "取消收藏" }),
+    ).toBeInTheDocument();
+    expect(service.isFavorite).toHaveBeenLastCalledWith("apple", "苹果");
+  });
+
+  it("ignores a late previous-question membership response and reports failed writes without flipping state", async () => {
+    const user = userEvent.setup();
+    let resolveFirst: (value: boolean) => void = () => undefined;
+    const firstLookup = new Promise<boolean>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 2 }],
+      samples: {
+        1: [
+          { id: 1, english: "apple", chinese: "苹果" },
+          { id: 2, english: "book", chinese: "书" },
+        ],
+      },
+    });
+    vi.mocked(service.isFavorite).mockImplementation((english) =>
+      english === "apple" ? firstLookup : Promise.resolve(false),
+    );
+    vi.mocked(service.addFavorite).mockRejectedValueOnce(new Error("保存失败"));
+    render(<App random={stableRandom} wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    expect(screen.getByRole("button", { name: "收藏这个单词" })).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "跳过" }));
+    await user.click(screen.getByRole("button", { name: "下一题" }));
+    expect(
+      await screen.findByRole("heading", { name: "书" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "收藏这个单词" }),
+    ).toBeEnabled();
+    await act(async () => {
+      resolveFirst(true);
+      await firstLookup;
+    });
+    expect(screen.getByRole("button", { name: "收藏这个单词" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "取消收藏" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "收藏这个单词" }));
+    expect(await screen.findByText("保存失败")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(screen.getByRole("button", { name: "收藏这个单词" })).toBeEnabled();
+    expect(service.addFavorite).toHaveBeenCalledWith("book", "书");
+  });
+  it("reports a favorite write failure after moving to the next question", async () => {
+    const user = userEvent.setup();
+    let rejectWrite: (reason: Error) => void = () => undefined;
+    const write = new Promise<WordEntry>((_resolve, reject) => {
+      rejectWrite = reject;
+    });
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 2 }],
+      samples: {
+        1: [
+          { id: 1, english: "apple", chinese: "苹果" },
+          { id: 2, english: "book", chinese: "书" },
+        ],
+      },
+    });
+    service.addFavorite = vi.fn(async () => write);
+    render(<App random={stableRandom} wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(
+      await screen.findByRole("button", { name: "收藏这个单词" }),
+    );
+    await user.click(screen.getByRole("button", { name: "跳过" }));
+    await user.click(screen.getByRole("button", { name: "下一题" }));
+    await act(async () => {
+      rejectWrite(new Error("磁盘不可写"));
+      try {
+        await write;
+      } catch {
+        /* expected */
+      }
+    });
+    expect(await screen.findByText("收藏操作失败：磁盘不可写")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(screen.getByRole("heading", { name: "书" })).toBeInTheDocument();
+  });
+
+  it("refreshes an already-open favorites list when an earlier write finishes", async () => {
+    const user = userEvent.setup();
+    let finishWrite: () => void = () => undefined;
+    const pending = new Promise<void>((resolve) => {
+      finishWrite = resolve;
+    });
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    const add = service.addFavorite;
+    service.addFavorite = vi.fn(async (english, chinese) => {
+      await pending;
+      return add(english, chinese);
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(
+      await screen.findByRole("button", { name: "收藏这个单词" }),
+    );
+    await user.type(screen.getByLabelText("英文答案"), "apple{Enter}");
+    await user.click(screen.getByRole("button", { name: "返回模式选择" }));
+    await user.click(screen.getByRole("button", { name: "查看收藏夹" }));
+    expect(
+      await screen.findByText("收藏夹还没有单词。练习时可以收藏当前单词。"),
+    ).toBeInTheDocument();
+    await act(async () => {
+      finishWrite();
+      await pending;
+    });
+    expect(await screen.findByText("苹果")).toBeInTheDocument();
+  });
+
+  it("ignores a stale list refresh after removing a favorite during another write", async () => {
+    const user = userEvent.setup();
+    let finishAdd: () => void = () => undefined;
+    let finishRemove: () => void = () => undefined;
+    let finishStaleList: () => void = () => undefined;
+    const addPending = new Promise<void>((resolve) => {
+      finishAdd = resolve;
+    });
+    const removePending = new Promise<void>((resolve) => {
+      finishRemove = resolve;
+    });
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 2, english: "book", chinese: "书" }] },
+      favorites: [{ id: 1, english: "apple", chinese: "苹果" }],
+    });
+    const add = service.addFavorite;
+    service.addFavorite = vi.fn(async (english, chinese) => {
+      await addPending;
+      return add(english, chinese);
+    });
+    const remove = service.removeFavorite;
+    service.removeFavorite = vi.fn(async (english, chinese) => {
+      await removePending;
+      return remove(english, chinese);
+    });
+    const list = service.listFavorites;
+    let listCalls = 0;
+    service.listFavorites = vi.fn(async () => {
+      listCalls += 1;
+      if (listCalls !== 2) return list();
+      const captured = await list();
+      return new Promise<WordEntry[]>((resolve) => {
+        finishStaleList = () => resolve(captured);
+      });
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(
+      await screen.findByRole("button", { name: "收藏这个单词" }),
+    );
+    await user.type(screen.getByLabelText("英文答案"), "book{Enter}");
+    await user.click(screen.getByRole("button", { name: "返回模式选择" }));
+    await user.click(screen.getByRole("button", { name: "查看收藏夹" }));
+    await screen.findByRole("button", { name: "移除 apple：苹果" });
+    await user.click(screen.getByRole("button", { name: "移除 apple：苹果" }));
+    await act(async () => {
+      finishAdd();
+      await addPending;
+    });
+    await waitFor(() => expect(service.listFavorites).toHaveBeenCalledTimes(2));
+    await act(async () => {
+      finishRemove();
+      await removePending;
+    });
+    await waitFor(() => expect(service.listFavorites).toHaveBeenCalledTimes(3));
+    await act(async () => {
+      finishStaleList();
+    });
+    expect(await screen.findByText("书")).toBeInTheDocument();
+    expect(screen.queryByText("苹果")).not.toBeInTheDocument();
+  });
+
+  it("shows a failed membership lookup without claiming an unsaved favorite", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    vi.mocked(service.isFavorite).mockRejectedValueOnce(new Error("查询失败"));
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    expect(await screen.findByText("查询失败")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(screen.getByRole("button", { name: "收藏这个单词" })).toBeDisabled();
+    expect(service.addFavorite).not.toHaveBeenCalled();
   });
 });

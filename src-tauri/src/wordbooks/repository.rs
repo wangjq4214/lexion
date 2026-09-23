@@ -7,6 +7,7 @@ use super::model::{ImportedEntry, WordEntry, WordbookSummary};
 #[derive(Debug)]
 pub enum RepositoryError {
     Conflict,
+    Validation(&'static str),
     Database(rusqlite::Error),
 }
 
@@ -51,7 +52,14 @@ impl WordbookRepository {
                 normalized_english TEXT NOT NULL,
                 UNIQUE(wordbook_id, normalized_english, chinese)
             );
-            CREATE INDEX IF NOT EXISTS entries_wordbook_id ON entries(wordbook_id);",
+            CREATE INDEX IF NOT EXISTS entries_wordbook_id ON entries(wordbook_id);
+            CREATE TABLE IF NOT EXISTS favorites (
+                id INTEGER PRIMARY KEY,
+                english TEXT NOT NULL CHECK(length(english) > 0),
+                chinese TEXT NOT NULL CHECK(length(chinese) > 0),
+                normalized_english TEXT NOT NULL,
+                UNIQUE(normalized_english, chinese)
+            );",
         )?;
         Ok(())
     }
@@ -129,6 +137,60 @@ impl WordbookRepository {
         Ok(())
     }
 
+    pub fn add_favorite(&self, english: &str, chinese: &str) -> Result<WordEntry, RepositoryError> {
+        let (english, chinese) = favorite_pair(english, chinese)?;
+        let connection = self.connect()?;
+        connection.execute(
+            "INSERT OR IGNORE INTO favorites(english, chinese, normalized_english)
+             VALUES (?1, ?2, ?3)",
+            params![english, chinese, english.to_lowercase()],
+        )?;
+        Ok(connection.query_row(
+            "SELECT id, english, chinese FROM favorites
+             WHERE normalized_english = ?1 AND chinese = ?2",
+            params![english.to_lowercase(), chinese],
+            word_entry,
+        )?)
+    }
+
+    pub fn remove_favorite(&self, english: &str, chinese: &str) -> Result<bool, RepositoryError> {
+        let (english, chinese) = favorite_pair(english, chinese)?;
+        let connection = self.connect()?;
+        Ok(connection.execute(
+            "DELETE FROM favorites WHERE normalized_english = ?1 AND chinese = ?2",
+            params![english.to_lowercase(), chinese],
+        )? != 0)
+    }
+
+    pub fn is_favorite(&self, english: &str, chinese: &str) -> Result<bool, RepositoryError> {
+        let (english, chinese) = favorite_pair(english, chinese)?;
+        let connection = self.connect()?;
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM favorites WHERE normalized_english = ?1 AND chinese = ?2)",
+            params![english.to_lowercase(), chinese],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn list_favorites(&self) -> Result<Vec<WordEntry>, rusqlite::Error> {
+        let connection = self.connect()?;
+        let mut statement =
+            connection.prepare("SELECT id, english, chinese FROM favorites ORDER BY id")?;
+        let rows = statement.query_map([], word_entry)?;
+        rows.collect()
+    }
+
+    pub fn sample_favorites(&self, limit: u8) -> Result<Vec<WordEntry>, RepositoryError> {
+        if limit == 0 {
+            return Err(RepositoryError::Validation("练习数量必须大于零"));
+        }
+        let connection = self.connect()?;
+        let mut statement = connection
+            .prepare("SELECT id, english, chinese FROM favorites ORDER BY RANDOM() LIMIT ?1")?;
+        let rows = statement.query_map([i64::from(limit)], word_entry)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn sample(&self, wordbook_id: i64, limit: u8) -> Result<Vec<WordEntry>, rusqlite::Error> {
         let connection = self.connect()?;
         let mut statement = connection.prepare(
@@ -147,6 +209,25 @@ impl WordbookRepository {
         })?;
         rows.collect()
     }
+}
+
+fn favorite_pair<'a>(
+    english: &'a str,
+    chinese: &'a str,
+) -> Result<(&'a str, &'a str), RepositoryError> {
+    let (english, chinese) = (english.trim(), chinese.trim());
+    if english.is_empty() || chinese.is_empty() {
+        return Err(RepositoryError::Validation("英文和中文释义都不能为空"));
+    }
+    Ok((english, chinese))
+}
+
+fn word_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordEntry> {
+    Ok(WordEntry {
+        id: row.get(0)?,
+        english: row.get(1)?,
+        chinese: row.get(2)?,
+    })
 }
 
 #[cfg(test)]
@@ -258,6 +339,98 @@ mod tests {
             .unwrap()
             .iter()
             .all(|entry| entry.english.starts_with("old-")));
+    }
+
+    #[test]
+    fn favorites_deduplicate_pairs_and_keep_first_display_text() {
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        let first = repository.add_favorite(" Apple ", " 苹果 ").unwrap();
+        let duplicate = repository.add_favorite("apple", "苹果").unwrap();
+        assert_eq!(first, duplicate);
+        assert_eq!(first.english, "Apple");
+        assert_eq!(first.chinese, "苹果");
+        let other = repository.add_favorite("APPLE", "水果").unwrap();
+        assert_ne!(first.id, other.id);
+        assert_eq!(repository.list_favorites().unwrap(), vec![first, other]);
+        assert!(repository.is_favorite(" aPpLe ", " 苹果 ").unwrap());
+        assert!(!repository.is_favorite("apple", "其他").unwrap());
+    }
+
+    #[test]
+    fn favorites_survive_replacement_and_reopening() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("words.sqlite");
+        let repository = WordbookRepository::open(&path).unwrap();
+        repository
+            .replace("同名", &entries("old", 2), false)
+            .unwrap();
+        let favorite = repository.add_favorite("old-0", "释义-0").unwrap();
+        repository
+            .replace("同名", &entries("new", 2), true)
+            .unwrap();
+        drop(repository);
+
+        let reopened = WordbookRepository::open(&path).unwrap();
+        assert_eq!(reopened.list_favorites().unwrap(), vec![favorite.clone()]);
+        assert!(reopened.is_favorite("OLD-0", "释义-0").unwrap());
+        assert_eq!(reopened.sample_favorites(10).unwrap(), vec![favorite]);
+    }
+
+    #[test]
+    fn favorite_sampling_is_bounded_unique_and_removal_is_idempotent() {
+        use std::collections::HashSet;
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        assert!(repository.sample_favorites(10).unwrap().is_empty());
+        for index in 0..60 {
+            repository
+                .add_favorite(&format!("word-{index}"), "释义")
+                .unwrap();
+        }
+        for limit in [1, 5, 50, 255] {
+            let sample = repository.sample_favorites(limit).unwrap();
+            assert_eq!(sample.len(), usize::from(limit).min(60));
+            assert_eq!(
+                sample
+                    .iter()
+                    .map(|entry| entry.id)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                sample.len()
+            );
+        }
+        assert!(repository.remove_favorite(" WORD-0 ", " 释义 ").unwrap());
+        assert!(!repository.remove_favorite("word-0", "释义").unwrap());
+        assert!(!repository.is_favorite("word-0", "释义").unwrap());
+        assert_eq!(repository.list_favorites().unwrap().len(), 59);
+    }
+
+    #[test]
+    fn favorites_reject_empty_fields_and_zero_limit_without_writing() {
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        assert!(matches!(
+            repository.add_favorite("  ", "释义"),
+            Err(RepositoryError::Validation(_))
+        ));
+        assert!(matches!(
+            repository.add_favorite("word", "  "),
+            Err(RepositoryError::Validation(_))
+        ));
+        assert!(matches!(
+            repository.remove_favorite("", "释义"),
+            Err(RepositoryError::Validation(_))
+        ));
+        assert!(matches!(
+            repository.is_favorite("word", ""),
+            Err(RepositoryError::Validation(_))
+        ));
+        assert!(matches!(
+            repository.sample_favorites(0),
+            Err(RepositoryError::Validation(_))
+        ));
+        assert!(repository.list_favorites().unwrap().is_empty());
     }
 
     #[test]

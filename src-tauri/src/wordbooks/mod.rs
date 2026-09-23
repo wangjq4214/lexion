@@ -41,13 +41,70 @@ pub fn import_wordbook(
         .map_err(|error| CommandError::Validation(error.to_string()))?;
     let wordbook = repository
         .replace(name, &entries, replace_existing)
-        .map_err(|error| match error {
-            repository::RepositoryError::Conflict => CommandError::Conflict,
-            repository::RepositoryError::Database(error) => {
-                CommandError::Database(error.to_string())
-            }
-        })?;
+        .map_err(map_repository_error)?;
     Ok(ImportResult { wordbook })
+}
+
+fn map_repository_error(error: repository::RepositoryError) -> CommandError {
+    match error {
+        repository::RepositoryError::Conflict => CommandError::Conflict,
+        repository::RepositoryError::Validation(message) => {
+            CommandError::Validation(message.to_owned())
+        }
+        repository::RepositoryError::Database(error) => CommandError::Database(error.to_string()),
+    }
+}
+
+#[tauri::command]
+pub fn add_favorite(
+    english: String,
+    chinese: String,
+    repository: State<'_, WordbookRepository>,
+) -> Result<WordEntry, CommandError> {
+    repository
+        .add_favorite(&english, &chinese)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
+pub fn remove_favorite(
+    english: String,
+    chinese: String,
+    repository: State<'_, WordbookRepository>,
+) -> Result<bool, CommandError> {
+    repository
+        .remove_favorite(&english, &chinese)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
+pub fn is_favorite(
+    english: String,
+    chinese: String,
+    repository: State<'_, WordbookRepository>,
+) -> Result<bool, CommandError> {
+    repository
+        .is_favorite(&english, &chinese)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
+pub fn list_favorites(
+    repository: State<'_, WordbookRepository>,
+) -> Result<Vec<WordEntry>, CommandError> {
+    repository
+        .list_favorites()
+        .map_err(|error| CommandError::Database(error.to_string()))
+}
+
+#[tauri::command]
+pub fn sample_favorites(
+    limit: u8,
+    repository: State<'_, WordbookRepository>,
+) -> Result<Vec<WordEntry>, CommandError> {
+    repository
+        .sample_favorites(limit)
+        .map_err(map_repository_error)
 }
 
 #[tauri::command]

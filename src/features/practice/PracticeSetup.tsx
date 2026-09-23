@@ -27,6 +27,9 @@ type PracticeSetupProps = {
   wordbookService: WordbookService;
   activeWordbookId: number | null;
   onSelectWordbook: (id: number) => void;
+  practiceSource: "wordbook" | "favorites";
+  onSelectSource: (source: "wordbook" | "favorites") => void;
+  onOpenFavorites: () => void;
   onImported: (id: number) => Promise<void>;
   onSelectMode: (mode: PracticeMode) => void;
   countSelection: string;
@@ -45,6 +48,9 @@ export function PracticeSetup({
   wordbookService,
   activeWordbookId,
   onSelectWordbook,
+  practiceSource,
+  onSelectSource,
+  onOpenFavorites,
   onImported,
   onSelectMode,
   countSelection,
@@ -58,23 +64,38 @@ export function PracticeSetup({
 }: PracticeSetupProps) {
   return (
     <Stack gap={6}>
-      <Stack direction="horizontal" gap={3} justify="between" wrap="wrap">
-        <Stack gap={2}>
-          <Heading level={1}>Lexicon 单词练习</Heading>
-          <Text color="secondary">选择单词本和练习方式，开始本轮练习。</Text>
+      <Section paddingBlockStart={6} paddingBlockEnd={0}>
+        <Stack direction="horizontal" gap={3} justify="between" wrap="wrap">
+          <Stack gap={2}>
+            <Heading level={1}>Lexicon 单词练习</Heading>
+            <Text color="secondary">选择单词本和练习方式，开始本轮练习。</Text>
+          </Stack>
+          <WordbookImportFlow
+            service={wordbookService}
+            size="sm"
+            variant="ghost"
+            isDisabled={isStarting}
+            onImported={(result) => onImported(result.wordbook.id)}
+          />
         </Stack>
-        <WordbookImportFlow
-          service={wordbookService}
-          size="sm"
-          variant="ghost"
-          isDisabled={isStarting}
-          onImported={(result) => onImported(result.wordbook.id)}
-        />
-      </Stack>
+      </Section>
 
       <Section>
         <Stack gap={4}>
           <Heading level={2}>练习设置</Heading>
+          <Selector
+            label="练习来源"
+            options={[
+              { value: "wordbook", label: "单词本" },
+              { value: "favorites", label: "收藏夹" },
+            ]}
+            value={practiceSource}
+            isDisabled={isStarting}
+            onChange={(value) =>
+              onSelectSource(value as "wordbook" | "favorites")
+            }
+            width="100%"
+          />
           <Selector
             label="当前单词本"
             options={wordbooks.map((wordbook) => ({
@@ -85,9 +106,15 @@ export function PracticeSetup({
             value={
               activeWordbookId === null ? undefined : String(activeWordbookId)
             }
-            isDisabled={isStarting}
+            isDisabled={isStarting || practiceSource === "favorites"}
             onChange={(value) => onSelectWordbook(Number(value))}
             width="100%"
+          />
+          <Button
+            label="查看收藏夹"
+            variant="secondary"
+            isDisabled={isStarting}
+            onClick={onOpenFavorites}
           />
           <ToggleButtonGroup
             label="练习模式"

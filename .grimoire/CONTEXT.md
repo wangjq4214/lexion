@@ -20,11 +20,28 @@
 ### practice-round
 - **Definition:** One complete vocabulary practice session created after the user starts practice, covering all sampled questions. A question is completed by answering correctly or skipping it. In Chinese-to-English questions, hints have three sequential levels: the first reveals about one third of the English letters, the second about two thirds while retaining earlier reveals, and the third reveals the full word. Each level counts as one hint use; the third is equivalent to skipping: it reveals the English word and Chinese meaning, counts as skipped rather than correct, and advances only after the learner has seen the answer. Direct skipping has the same reveal and continuation behavior. Elapsed time starts when the first question is shown, includes retries, hints, and skips, and stops when the last question is completed. The completion summary displays minutes and seconds, correct answers, error count, hint count, and skip count, but does not list skipped words.
 - **Relationships:**
-  - depends on active-wordbook
+  - depends on practice-source
   - contains vocabulary-entry
+  - contains favorite-entry
 
 ### wordbook-import
 - **Definition:** An atomic operation that reads `english` and `chinese` columns from the first worksheet of an `.xlsx` or `.xls` file, defaults the wordbook name from the file name while allowing edits, and persists the resulting wordbook in SQLite. Duplicate pairs are detected after trimming both values and comparing English case-insensitively; the same English word with a different Chinese meaning remains a separate entry. A duplicate wordbook name requires confirmation before replacement.
 - **Relationships:**
   - implements wordbook
   - contains vocabulary-entry
+
+### favorites-collection
+- **Definition:** The application's single collection of saved word-and-meaning pairs for later review and practice. Its contents remain available when the source wordbook is replaced by another import.
+- **Relationships:**
+  - contains favorite-entry
+
+### favorite-entry
+- **Definition:** A saved copy of an English word and Chinese meaning originally taken from a vocabulary-entry. Its lifetime is independent of the source wordbook and its entries.
+- **Relationships:**
+  - belongs to favorites-collection
+
+### practice-source
+- **Definition:** The selected source for drawing a practice round: either the active wordbook or the single favorites collection.
+- **Relationships:**
+  - references active-wordbook
+  - references favorites-collection
