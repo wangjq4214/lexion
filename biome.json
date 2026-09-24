@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!src-tauri"]
+    "includes": ["**", "!src-tauri", "!src/routeTree.gen.ts"]
   },
   "formatter": {
     "enabled": true,

@@ -1,6 +1,7 @@
 // @ts-expect-error type error without @types/node package
 import process from "node:process";
 import stylex from "@stylexjs/unplugin";
+import { tanstackRouter } from "@tanstack/router-plugin/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
@@ -8,7 +9,11 @@ const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
 export default defineConfig(() => ({
-  plugins: [stylex.vite({ useCSSLayers: true }), react({ compiler: true })],
+  plugins: [
+    tanstackRouter(),
+    stylex.vite({ useCSSLayers: true }),
+    react({ compiler: true }),
+  ],
   build: {
     rolldownOptions: {
       output: {

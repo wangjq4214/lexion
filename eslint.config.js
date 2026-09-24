@@ -3,6 +3,7 @@ import tseslintParser from "@typescript-eslint/parser";
 import reactHooks from "eslint-plugin-react-hooks";
 
 export default [
+  { ignores: ["src/routeTree.gen.ts"] },
   {
     files: ["src/**/*.{js,jsx,ts,tsx}"],
     languageOptions: {

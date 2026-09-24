@@ -1,9 +1,14 @@
 import {
+  createBrowserHistory,
+  createMemoryHistory,
+} from "@tanstack/react-router";
+import {
   act,
   fireEvent,
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -1666,5 +1671,231 @@ describe("App wordbook practice", () => {
     expect(
       screen.queryByRole("button", { name: "从单词本删除当前单词" }),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("file routes and round navigation", () => {
+  const service = () =>
+    createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+
+  it.each(["/practice", "/summary"])(
+    "returns a fresh %s URL to setup",
+    async (path) => {
+      const history = createMemoryHistory({ initialEntries: [path] });
+      render(<App history={history} wordbookService={service()} />);
+      expect(
+        await screen.findByRole("heading", { name: "练习设置" }),
+      ).toBeInTheDocument();
+      await waitFor(() => expect(history.location.pathname).toBe("/"));
+    },
+  );
+
+  it("blocks history departure until explicit settlement", async () => {
+    const user = userEvent.setup();
+    const history = createMemoryHistory({ initialEntries: ["/", "/"] });
+    render(<App history={history} wordbookService={service()} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    expect(await screen.findByText("0 / 1")).toBeInTheDocument();
+    expect(history.location.pathname).toBe("/practice");
+    await act(async () => history.push("/favorites"));
+    await waitFor(() => expect(history.location.pathname).toBe("/practice"));
+    expect(screen.getByText(/请使用“退出并结算”/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(
+      await screen.findByRole("heading", { name: "练习已提前结算" }),
+    ).toBeInTheDocument();
+    expect(history.location.pathname).toBe("/summary");
+    await act(async () => history.push("/"));
+    expect(
+      await screen.findByRole("heading", { name: "练习设置" }),
+    ).toBeInTheDocument();
+    expect(history.location.pathname).toBe("/");
+  });
+
+  it("refreshes collection data when returning via route history", async () => {
+    const user = userEvent.setup();
+    const serviceInstance = service();
+    const history = createMemoryHistory({ initialEntries: ["/"] });
+    render(<App history={history} wordbookService={serviceInstance} />);
+    await user.click(await screen.findByRole("button", { name: "查看收藏夹" }));
+    await screen.findByRole("heading", { name: "收藏夹" });
+    expect(history.location.pathname).toBe("/favorites");
+    await act(async () => history.back());
+    expect(
+      await screen.findByRole("heading", { name: "练习设置" }),
+    ).toBeInTheDocument();
+    await act(async () => history.forward());
+    await waitFor(() =>
+      expect(vi.mocked(serviceInstance.listFavorites).mock.calls.length).toBe(
+        2,
+      ),
+    );
+    expect(history.location.pathname).toBe("/favorites");
+  });
+
+  it("blocks browser back during an active round", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/");
+    const history = createBrowserHistory();
+    history.push("/");
+    render(<App history={history} wordbookService={service()} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    expect(await screen.findByText("0 / 1")).toBeInTheDocument();
+    await act(async () => history.back());
+    expect(await screen.findByText(/请使用“退出并结算”/)).toBeInTheDocument();
+    await waitFor(() => expect(history.location.pathname).toBe("/practice"));
+    history.destroy();
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("blocks back with a revealed wrong answer through failed writes, then settles exactly once", async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, "", "/");
+    const history = createBrowserHistory();
+    history.push("/");
+    const instance = service();
+    let releaseMistake: () => void = () => undefined;
+    const pending = new Promise<void>((resolve) => {
+      releaseMistake = resolve;
+    });
+    const record = instance.recordMistakeOnce;
+    instance.recordMistakeOnce = vi.fn(
+      async (english, chinese, submissionId) => {
+        await pending;
+        return record(english, chinese, submissionId);
+      },
+    );
+    vi.mocked(instance.completeReview).mockRejectedValueOnce(
+      new Error("磁盘不可用"),
+    );
+    render(<App history={history} wordbookService={instance} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.type(screen.getByLabelText("英文答案"), "wrong{Enter}");
+    expect(screen.getByText(/本题答错/)).toBeInTheDocument();
+    await act(async () => history.back());
+    await waitFor(() => expect(history.location.pathname).toBe("/practice"));
+    expect(screen.getByText(/请使用“退出并结算”/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "退出并结算" })).toBeDisabled();
+    expect(instance.completeReview).not.toHaveBeenCalled();
+
+    await act(async () => {
+      releaseMistake();
+      await pending;
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "退出并结算" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(
+      await screen.findByText(/保存复习进度失败，请重试/),
+    ).toBeInTheDocument();
+    expect(history.location.pathname).toBe("/practice");
+    await act(async () => history.push("/favorites"));
+    await waitFor(() => expect(history.location.pathname).toBe("/practice"));
+    expect(screen.getByText(/本题答错/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(
+      await screen.findByRole("heading", { name: "练习已提前结算" }),
+    ).toBeInTheDocument();
+    expect(history.location.pathname).toBe("/summary");
+    expect(screen.getByText("已完成题数：1")).toBeInTheDocument();
+    expect(instance.recordMistakeOnce).toHaveBeenCalledTimes(1);
+    expect(instance.completeReview).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(instance.completeReview).mock.calls[0]?.[0]).toEqual(
+      vi.mocked(instance.completeReview).mock.calls[1]?.[0],
+    );
+    history.destroy();
+    window.history.replaceState(null, "", "/");
+  });
+
+  it("loads mistakes afresh when revisiting via history", async () => {
+    const user = userEvent.setup();
+    const instance = service();
+    const history = createMemoryHistory({ initialEntries: ["/"] });
+    render(<App history={history} wordbookService={instance} />);
+    await user.click(await screen.findByRole("button", { name: "查看错题本" }));
+    expect(
+      await screen.findByRole("heading", { name: "错题本" }),
+    ).toBeInTheDocument();
+    expect(history.location.pathname).toBe("/mistakes");
+    await act(async () => history.back());
+    expect(
+      await screen.findByRole("heading", { name: "练习设置" }),
+    ).toBeInTheDocument();
+    await act(async () => history.forward());
+    await waitFor(() => expect(instance.listMistakes).toHaveBeenCalledTimes(2));
+    expect(history.location.pathname).toBe("/mistakes");
+  });
+
+  it("keeps simultaneous routers and Jotai stores independent", async () => {
+    const user = userEvent.setup();
+    const firstHistory = createMemoryHistory({ initialEntries: ["/"] });
+    const secondHistory = createMemoryHistory({ initialEntries: ["/"] });
+    const first = render(
+      <App history={firstHistory} wordbookService={service()} />,
+    );
+    const second = render(
+      <App history={secondHistory} wordbookService={service()} />,
+    );
+    await within(first.container).findByRole("button", { name: "开始练习" });
+    expect(
+      await within(second.container).findByRole("heading", {
+        name: "练习设置",
+      }),
+    ).toBeInTheDocument();
+    await user.click(
+      within(first.container).getByRole("button", { name: "开始练习" }),
+    );
+    expect(
+      await within(first.container).findByText("0 / 1"),
+    ).toBeInTheDocument();
+    expect(firstHistory.location.pathname).toBe("/practice");
+    expect(secondHistory.location.pathname).toBe("/");
+    expect(
+      within(second.container).getByRole("heading", { name: "练习设置" }),
+    ).toBeInTheDocument();
+    expect(
+      within(second.container).getByRole("button", { name: "开始练习" }),
+    ).toBeEnabled();
+  });
+  it("redirects a settled summary back to summary if practice URL is revisited", async () => {
+    const user = userEvent.setup();
+    const history = createMemoryHistory({ initialEntries: ["/"] });
+    render(<App history={history} wordbookService={service()} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await screen.findByText("0 / 1");
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    await screen.findByRole("heading", { name: "练习已提前结算" });
+    await act(async () => history.push("/practice"));
+    await waitFor(() => expect(history.location.pathname).toBe("/summary"));
+    expect(
+      screen.getByRole("heading", { name: "练习已提前结算" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a delayed favorite write failure visible after settlement", async () => {
+    const user = userEvent.setup();
+    const history = createMemoryHistory({ initialEntries: ["/"] });
+    const instance = service();
+    let rejectFavorite: (error: Error) => void = () => undefined;
+    const pendingFavorite = new Promise<WordEntry>((_, reject) => {
+      rejectFavorite = reject;
+    });
+    instance.addFavorite = vi.fn(() => pendingFavorite);
+    render(<App history={history} wordbookService={instance} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(
+      await screen.findByRole("button", { name: "收藏这个单词" }),
+    );
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    await screen.findByRole("heading", { name: "练习已提前结算" });
+    await act(async () => rejectFavorite(new Error("写入失败")));
+    expect(
+      await screen.findByText("收藏操作失败：写入失败"),
+    ).toBeInTheDocument();
+    expect(history.location.pathname).toBe("/summary");
   });
 });
