@@ -1477,6 +1477,161 @@ describe("App wordbook practice", () => {
     expect(service.completeReview).not.toHaveBeenCalled();
   });
 
+  it("settles zero completed questions without writing an unfinished review", async () => {
+    let now = 0;
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    render(<App now={() => now} wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(screen.getByRole("button", { name: "显示第 1 级提示" }));
+    await user.type(screen.getByLabelText("英文答案"), "app");
+    now = 12_500;
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(
+      screen.getByRole("heading", { name: "练习已提前结算" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("已完成题数：0")).toBeInTheDocument();
+    expect(screen.getByText("答对题数：0 / 0")).toBeInTheDocument();
+    expect(screen.getByText("提示次数：0")).toBeInTheDocument();
+    expect(screen.getByText("总用时：0:12")).toBeInTheDocument();
+    expect(service.completeReview).not.toHaveBeenCalled();
+  });
+
+  it("keeps earlier completions but excludes hints on an unfinished next question", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 2 }],
+      samples: {
+        1: [
+          { id: 1, english: "apple", chinese: "苹果" },
+          { id: 2, english: "book", chinese: "书" },
+        ],
+      },
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.type(screen.getByLabelText("英文答案"), "apple{Enter}");
+    expect(await screen.findByText("1 / 2")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "显示第 1 级提示" }));
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(screen.getByText("已完成题数：1")).toBeInTheDocument();
+    expect(screen.getByText("答对题数：1 / 1")).toBeInTheDocument();
+    expect(screen.getByText("提示次数：0")).toBeInTheDocument();
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves a revealed skip before settlement and retries when saving fails", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    vi.mocked(service.completeReview).mockRejectedValueOnce(
+      new Error("磁盘不可用"),
+    );
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(screen.getByRole("button", { name: "跳过" }));
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(
+      await screen.findByText(/保存复习进度失败，请重试/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "退出并结算" })).toBeEnabled();
+    expect(screen.getByText("英文：apple")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(await screen.findByText("已完成题数：1")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
+    expect(service.completeReview).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(service.completeReview).mock.calls[0]?.[0]).toEqual({
+      reviewId: 1,
+      errorCount: 0,
+      hintCount: 0,
+      skipped: true,
+    });
+  });
+
+  it("counts the third spelling hint as a saved skip on exit", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    for (const label of [
+      "显示第 1 级提示",
+      "显示第 2 级提示",
+      "显示第 3 级提示并跳过",
+    ]) {
+      await user.click(screen.getByRole("button", { name: label }));
+    }
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(await screen.findByText("已完成题数：1")).toBeInTheDocument();
+    expect(screen.getByText("提示次数：3")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
+    expect(service.completeReview).toHaveBeenCalledWith({
+      reviewId: 1,
+      errorCount: 0,
+      hintCount: 3,
+      skipped: true,
+    });
+  });
+
+  it("waits for a revealed wrong answer's mistake and review writes before exiting", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    let releaseMistake: () => void = () => undefined;
+    const pendingMistake = new Promise<void>((resolve) => {
+      releaseMistake = resolve;
+    });
+    let releaseReview: () => void = () => undefined;
+    const pendingReview = new Promise<void>((resolve) => {
+      releaseReview = resolve;
+    });
+    const record = service.recordMistakeOnce;
+    service.recordMistakeOnce = vi.fn(
+      async (english: string, chinese: string, submissionId: string) => {
+        await pendingMistake;
+        return record(english, chinese, submissionId);
+      },
+    );
+    service.completeReview = vi.fn(async () => {
+      await pendingReview;
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.type(screen.getByLabelText("英文答案"), "bad{Enter}");
+    expect(screen.getByRole("button", { name: "退出并结算" })).toBeDisabled();
+    await act(async () => {
+      releaseMistake();
+      await pendingMistake;
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "退出并结算" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(service.completeReview).toHaveBeenCalledWith({
+      reviewId: 1,
+      errorCount: 1,
+      hintCount: 0,
+      skipped: false,
+    });
+    expect(screen.getByRole("button", { name: "退出并结算" })).toBeDisabled();
+    await act(async () => {
+      releaseReview();
+      await pendingReview;
+    });
+    expect(await screen.findByText("已完成题数：1")).toBeInTheDocument();
+    expect(screen.getByText("错误次数：1")).toBeInTheDocument();
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a deleted question on failure and hides deletion outside wordbook practice", async () => {
     const user = userEvent.setup();
     const service = createService({

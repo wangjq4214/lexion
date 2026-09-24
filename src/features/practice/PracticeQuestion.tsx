@@ -29,6 +29,7 @@ type PracticeQuestionProps = {
   onHint: () => void;
   onSkip: () => void;
   onSubmit: () => void;
+  onExit: () => void;
   onContinue: () => void;
 };
 
@@ -88,6 +89,7 @@ export function PracticeQuestion({
   onHint,
   onSkip,
   onSubmit,
+  onExit,
   onContinue,
 }: PracticeQuestionProps) {
   const question = state.questions[state.questionIndex];
@@ -111,6 +113,14 @@ export function PracticeQuestion({
           <Text color="secondary">
             本轮用时：{formatElapsedTime(elapsedSeconds)}
           </Text>
+          <Stack direction="horizontal" justify="end">
+            <Button
+              label="退出并结算"
+              variant="ghost"
+              isDisabled={isCompleting || isBlocked}
+              onClick={onExit}
+            />
+          </Stack>
         </Stack>
       </Section>
       <Section>

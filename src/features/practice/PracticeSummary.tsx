@@ -25,7 +25,9 @@ export function PracticeSummary({
     <Stack gap={6}>
       <Section paddingBlockStart={6} paddingBlockEnd={0}>
         <Stack gap={2} role="status" aria-live="polite">
-          <Heading level={1}>本轮练习完成</Heading>
+          <Heading level={1}>
+            {state.exitedEarly ? "练习已提前结算" : "本轮练习完成"}
+          </Heading>
           <Text color="secondary">{modeLabels[state.mode]}</Text>
         </Stack>
       </Section>
@@ -33,6 +35,7 @@ export function PracticeSummary({
         <Stack gap={4}>
           <Heading level={2}>练习结果</Heading>
           <Stack gap={2}>
+            <Text>已完成题数：{state.totalCount}</Text>
             <Text>
               答对题数：{state.correctCount} / {state.totalCount}
             </Text>

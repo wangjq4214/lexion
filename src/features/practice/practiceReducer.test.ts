@@ -25,6 +25,66 @@ function start(entries = questions) {
   });
 }
 
+describe("early settlement", () => {
+  it("exits the first unanswered question without counting its hints", () => {
+    let state = start();
+    state = appReducer(state, { type: "start-hints", hints: ["a _", "a p _"] });
+    state = appReducer(state, { type: "change-answer", answer: "a" });
+    state = appReducer(state, { type: "exit-and-settle", elapsedSeconds: 12 });
+    expect(state).toMatchObject({
+      phase: "summary",
+      exitedEarly: true,
+      totalCount: 0,
+      correctCount: 0,
+      errorCount: 0,
+      hintCount: 0,
+      skippedCount: 0,
+      elapsedSeconds: 12,
+    });
+  });
+
+  it("keeps only completed questions when leaving a later unanswered question", () => {
+    let state = start();
+    state = appReducer(state, { type: "change-answer", answer: "apple" });
+    state = appReducer(state, { type: "submit-answer", elapsedSeconds: 3 });
+    state = appReducer(state, { type: "start-hints", hints: ["b _", "b o _"] });
+    state = appReducer(state, { type: "exit-and-settle", elapsedSeconds: 9 });
+    expect(state).toMatchObject({
+      phase: "summary",
+      totalCount: 1,
+      correctCount: 1,
+      hintCount: 0,
+      errorCount: 0,
+      skippedCount: 0,
+      elapsedSeconds: 9,
+    });
+  });
+
+  it("includes a revealed wrong answer or skip as completed", () => {
+    let wrong = start();
+    wrong = appReducer(wrong, { type: "change-answer", answer: "bad" });
+    wrong = appReducer(wrong, { type: "submit-answer", elapsedSeconds: 1 });
+    expect(
+      appReducer(wrong, { type: "exit-and-settle", elapsedSeconds: 5 }),
+    ).toMatchObject({
+      phase: "summary",
+      totalCount: 1,
+      errorCount: 1,
+      skippedCount: 0,
+    });
+    let skipped = start();
+    skipped = appReducer(skipped, { type: "skip-question" });
+    expect(
+      appReducer(skipped, { type: "exit-and-settle", elapsedSeconds: 5 }),
+    ).toMatchObject({
+      phase: "summary",
+      totalCount: 1,
+      errorCount: 0,
+      skippedCount: 1,
+    });
+  });
+});
+
 describe("wrong answer reveal", () => {
   it("keeps the submitted answer and hints until the learner continues", () => {
     let state = start();

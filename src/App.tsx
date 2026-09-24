@@ -525,7 +525,7 @@ function App({
   };
 
   const completeQuestion = async (
-    type: "submit-answer" | "continue-after-reveal",
+    type: "submit-answer" | "continue-after-reveal" | "exit-and-settle",
   ) => {
     if (
       state.phase !== "practice" ||
@@ -534,6 +534,15 @@ function App({
       pendingMistakeRef.current
     )
       return;
+    const currentElapsedSeconds =
+      roundStartedAt.current === null
+        ? elapsedSeconds
+        : getElapsedSeconds(roundStartedAt.current, now());
+    if (type === "exit-and-settle" && state.revealReason === null) {
+      setElapsedSeconds(currentElapsedSeconds);
+      dispatch({ type, elapsedSeconds: currentElapsedSeconds });
+      return;
+    }
     const question = state.questions[state.questionIndex];
     if (question.reviewId === undefined) {
       setReviewWriteError("复习记录缺少题目身份，请重新开始练习。");
@@ -543,17 +552,12 @@ function App({
     setReviewWriteError(null);
     setIsCompleting(true);
     try {
-      const currentElapsedSeconds =
-        roundStartedAt.current === null
-          ? elapsedSeconds
-          : getElapsedSeconds(roundStartedAt.current, now());
       await withWriteTimeout(
         wordbookService.completeReview({
           reviewId: question.reviewId,
           errorCount: state.questionErrorCount,
           hintCount: state.questionHintCount,
-          skipped:
-            type === "continue-after-reveal" && state.revealReason === "skip",
+          skipped: type !== "submit-answer" && state.revealReason === "skip",
         }),
         "复习进度尚未保存，请稍后重试。",
       );
@@ -711,6 +715,7 @@ function App({
             dispatch({ type: "skip-question" });
         }}
         onSubmit={submitAnswer}
+        onExit={() => void completeQuestion("exit-and-settle")}
         onContinue={() => void completeQuestion("continue-after-reveal")}
       />
     );

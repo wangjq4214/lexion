@@ -35,6 +35,7 @@ export type SummaryState = {
   hintCount: number;
   skippedCount: number;
   elapsedSeconds: number;
+  exitedEarly?: boolean;
 };
 
 export type AppState = SetupState | PracticeState | SummaryState;
@@ -48,6 +49,7 @@ export type AppAction =
   | { type: "advance-hint" }
   | { type: "skip-question" }
   | { type: "continue-after-reveal"; elapsedSeconds: number }
+  | { type: "exit-and-settle"; elapsedSeconds: number }
   | { type: "delete-question"; reviewId: number; elapsedSeconds: number }
   | { type: "back-to-setup" };
 
@@ -86,6 +88,22 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
   if (state.phase !== "practice") {
     return state;
+  }
+
+  if (action.type === "exit-and-settle") {
+    const completedCurrent = state.revealReason !== null;
+    return {
+      phase: "summary",
+      mode: state.mode,
+      correctCount: state.correctCount,
+      totalCount: state.questionIndex + Number(completedCurrent),
+      errorCount: state.errorCount,
+      hintCount:
+        state.hintCount - (completedCurrent ? 0 : state.questionHintCount),
+      skippedCount: state.skippedCount,
+      elapsedSeconds: action.elapsedSeconds,
+      exitedEarly: true,
+    };
   }
 
   if (action.type === "delete-question") {
