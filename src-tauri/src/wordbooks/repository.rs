@@ -206,6 +206,40 @@ impl WordbookRepository {
             entry_count: entries.len() as i64,
         })
     }
+    pub fn delete_wordbook_entry(
+        &self,
+        wordbook_id: i64,
+        entry_id: i64,
+    ) -> Result<bool, RepositoryError> {
+        if wordbook_id <= 0 || entry_id <= 0 {
+            return Err(RepositoryError::Validation("单词本和词条 ID 必须大于零"));
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let pair: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT normalized_english, chinese FROM entries WHERE id = ?1 AND wordbook_id = ?2",
+                params![entry_id, wordbook_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((normalized_english, chinese)) = pair else {
+            return Ok(false);
+        };
+        transaction.execute(
+            "DELETE FROM entries WHERE id = ?1 AND wordbook_id = ?2",
+            params![entry_id, wordbook_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM review_coverage WHERE source = 'wordbook' AND source_id = ?1
+             AND normalized_english = ?2 AND chinese = ?3",
+            params![wordbook_id, normalized_english, chinese],
+        )?;
+        // Pending review tokens are pair-scoped, not source-scoped. Leave them to their
+        // normal expiration so deleting one source cannot invalidate another's review.
+        transaction.commit()?;
+        Ok(true)
+    }
 
     fn insert_entries(
         transaction: &Transaction<'_>,
@@ -476,6 +510,144 @@ mod tests {
             sample.len()
         );
         assert_eq!(reopened.sample(listed[1].id, 50).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deleting_entry_scopes_coverage_and_preserves_independent_collections() {
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        let first = repository
+            .replace(
+                "first",
+                &[
+                    ImportedEntry {
+                        english: "Apple".into(),
+                        chinese: "苹果".into(),
+                    },
+                    ImportedEntry {
+                        english: "Pear".into(),
+                        chinese: "梨".into(),
+                    },
+                ],
+                false,
+            )
+            .unwrap();
+        let second = repository
+            .replace(
+                "second",
+                &[ImportedEntry {
+                    english: "apple".into(),
+                    chinese: "苹果".into(),
+                }],
+                false,
+            )
+            .unwrap();
+        let target = repository
+            .sample(first.id, 10)
+            .unwrap()
+            .into_iter()
+            .find(|entry| entry.english == "Apple")
+            .unwrap();
+        let other = repository.sample(second.id, 10).unwrap()[0].clone();
+        let favorite = repository.add_favorite("Apple", "苹果").unwrap();
+        let mistake = repository.record_mistake("Apple", "苹果").unwrap();
+        let first_review = repository
+            .schedule_practice("wordbook", Some(first.id), 2, "zh-to-en")
+            .unwrap();
+        let target_review = first_review
+            .iter()
+            .find(|question| question.entry.id == target.id)
+            .unwrap();
+        repository
+            .complete_review(target_review.review_id, 0, 0, false)
+            .unwrap();
+        repository
+            .schedule_practice("wordbook", Some(second.id), 1, "zh-to-en")
+            .unwrap();
+        repository
+            .schedule_practice("favorites", None, 1, "zh-to-en")
+            .unwrap();
+        repository
+            .schedule_practice("mistakes", None, 1, "zh-to-en")
+            .unwrap();
+        let connection = repository.connect().unwrap();
+        let coverage = |source: &str, source_id: i64, english: &str| -> i64 {
+            connection.query_row(
+                "SELECT COUNT(*) FROM review_coverage WHERE source = ?1 AND source_id = ?2 AND normalized_english = ?3 AND chinese = '苹果'",
+                params![source, source_id, english], |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(coverage("wordbook", first.id, "apple"), 1);
+        assert_eq!(coverage("wordbook", second.id, "apple"), 1);
+        assert_eq!(coverage("favorites", 0, "apple"), 1);
+        assert_eq!(coverage("mistakes", 0, "apple"), 1);
+        let memory_before: (f64, f64, f64) = connection.query_row(
+            "SELECT stability, last_reviewed, due_at FROM review_memory WHERE normalized_english = 'apple' AND chinese = '苹果' AND direction = 'zh-to-en'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        drop(connection);
+
+        // A valid entry belonging to another wordbook and a missing entry are no-ops.
+        assert!(!repository
+            .delete_wordbook_entry(first.id, other.id)
+            .unwrap());
+        assert!(!repository
+            .delete_wordbook_entry(first.id, i64::MAX)
+            .unwrap());
+        assert_eq!(repository.sample(first.id, 10).unwrap().len(), 2);
+        assert_eq!(coverage_count(&repository, first.id, "apple"), 1);
+        assert!(repository
+            .delete_wordbook_entry(first.id, target.id)
+            .unwrap());
+        assert!(!repository
+            .delete_wordbook_entry(first.id, target.id)
+            .unwrap());
+        assert_eq!(repository.sample(first.id, 10).unwrap().len(), 1);
+        assert_eq!(repository.sample(second.id, 10).unwrap(), vec![other]);
+        assert_eq!(repository.list().unwrap()[0].entry_count, 1);
+        assert_eq!(coverage_count(&repository, first.id, "apple"), 0);
+        assert_eq!(coverage_count(&repository, second.id, "apple"), 1);
+        assert_eq!(repository.list_favorites().unwrap(), vec![favorite]);
+        assert_eq!(repository.list_mistakes().unwrap(), vec![mistake]);
+        let connection = repository.connect().unwrap();
+        for source in ["favorites", "mistakes"] {
+            assert_eq!(connection.query_row(
+                "SELECT COUNT(*) FROM review_coverage WHERE source = ?1 AND normalized_english = 'apple' AND chinese = '苹果'",
+                [source], |row| row.get::<_, i64>(0),
+            ).unwrap(), 1);
+        }
+        assert_eq!(connection.query_row(
+            "SELECT stability, last_reviewed, due_at FROM review_memory WHERE normalized_english = 'apple' AND chinese = '苹果' AND direction = 'zh-to-en'",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap(), memory_before);
+    }
+
+    fn coverage_count(repository: &WordbookRepository, wordbook_id: i64, english: &str) -> i64 {
+        repository.connect().unwrap().query_row(
+            "SELECT COUNT(*) FROM review_coverage WHERE source = 'wordbook' AND source_id = ?1 AND normalized_english = ?2",
+            params![wordbook_id, english], |row| row.get(0),
+        ).unwrap()
+    }
+
+    #[test]
+    fn deletion_rejects_nonpositive_ids_without_writes() {
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        let book = repository
+            .replace("book", &entries("word", 1), false)
+            .unwrap();
+        let entry = repository.sample(book.id, 1).unwrap()[0].clone();
+        repository
+            .schedule_practice("wordbook", Some(book.id), 1, "zh-to-en")
+            .unwrap();
+        for (book_id, entry_id) in [(0, entry.id), (-1, entry.id), (book.id, 0), (book.id, -1)] {
+            assert!(matches!(
+                repository.delete_wordbook_entry(book_id, entry_id),
+                Err(RepositoryError::Validation(_))
+            ));
+        }
+        assert_eq!(repository.sample(book.id, 1).unwrap(), vec![entry]);
+        assert_eq!(coverage_count(&repository, book.id, "word-0"), 1);
     }
 
     #[test]

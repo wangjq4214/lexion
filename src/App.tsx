@@ -1,3 +1,4 @@
+import { AlertDialog } from "@astryxdesign/core/AlertDialog";
 import { AppShell } from "@astryxdesign/core/AppShell";
 import { Button } from "@astryxdesign/core/Button";
 import { Layout, LayoutContent } from "@astryxdesign/core/Layout";
@@ -164,6 +165,16 @@ function App({
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const roundStartedAt = useRef<number | null>(null);
   const [roundKey, setRoundKey] = useState(0);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    roundKey: number;
+    questionIndex: number;
+    reviewId: number;
+    wordbookId: number;
+    entry: WordEntry;
+  } | null>(null);
+  const deletingRef = useRef(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   useLayoutEffect(() => {
     const { className } = stylex.props(styles.documentRoot);
@@ -373,6 +384,8 @@ function App({
     setIsStarting(true);
     setPracticeError(null);
     setReviewWriteError(null);
+    setDeleteError(null);
+    setDeleteTarget(null);
     try {
       const entries = await wordbookService.schedulePractice({
         source: practiceSource,
@@ -412,6 +425,81 @@ function App({
     }
   };
 
+  const requestDelete = () => {
+    if (
+      state.phase !== "practice" ||
+      practiceSource !== "wordbook" ||
+      activeWordbookId === null ||
+      pendingMistakeRef.current ||
+      completingReview.current ||
+      deletingRef.current
+    )
+      return;
+    const question = state.questions[state.questionIndex];
+    if (question.reviewId === undefined) return;
+    setDeleteError(null);
+    setDeleteTarget({
+      roundKey,
+      questionIndex: state.questionIndex,
+      reviewId: question.reviewId,
+      wordbookId: activeWordbookId,
+      entry: question.entry,
+    });
+  };
+
+  const confirmDelete = async () => {
+    const target = deleteTarget;
+    if (!target || deletingRef.current || state.phase !== "practice") return;
+    if (
+      roundKey !== target.roundKey ||
+      state.questionIndex !== target.questionIndex ||
+      state.questions[state.questionIndex].reviewId !== target.reviewId ||
+      pendingMistakeRef.current ||
+      completingReview.current
+    ) {
+      setDeleteTarget(null);
+      return;
+    }
+    deletingRef.current = true;
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      const removed = await wordbookService.deleteWordbookEntry(
+        target.wordbookId,
+        target.entry.id,
+      );
+      if (!removed)
+        throw new Error("该单词已不在当前单词本中，请重新开始练习。");
+      const currentElapsedSeconds =
+        roundStartedAt.current === null
+          ? elapsedSeconds
+          : getElapsedSeconds(roundStartedAt.current, now());
+      setElapsedSeconds(currentElapsedSeconds);
+      setWordbooks(
+        (listed) =>
+          listed?.map((book) =>
+            book.id === target.wordbookId
+              ? { ...book, entryCount: Math.max(0, book.entryCount - 1) }
+              : book,
+          ) ?? null,
+      );
+      dispatch({
+        type: "delete-question",
+        reviewId: target.reviewId,
+        elapsedSeconds: currentElapsedSeconds,
+      });
+      setDeleteTarget(null);
+    } catch (error) {
+      setDeleteError(
+        `删除失败：${error instanceof Error ? error.message : String(error)}`,
+      );
+      setDeleteTarget(null);
+    } finally {
+      deletingRef.current = false;
+      setIsDeleting(false);
+    }
+  };
+
   const saveMistake = async (submission: MistakeSubmission) => {
     if (savingMistakeRef.current) return;
     savingMistakeRef.current = true;
@@ -443,6 +531,7 @@ function App({
     if (
       state.phase !== "practice" ||
       completingReview.current ||
+      deletingRef.current ||
       pendingMistakeRef.current
     )
       return;
@@ -484,6 +573,7 @@ function App({
       state.phase !== "practice" ||
       state.isAnswerRevealed ||
       completingReview.current ||
+      deletingRef.current ||
       pendingMistakeRef.current
     )
       return;
@@ -585,15 +675,23 @@ function App({
         state={state}
         elapsedSeconds={elapsedSeconds}
         isCompleting={isCompleting}
-        isBlocked={pendingMistake !== null}
+        isBlocked={pendingMistake !== null || isDeleting}
         isFavorite={isFavorite}
+        canDelete={practiceSource === "wordbook"}
+        isDeleting={isDeleting}
+        onRequestDelete={requestDelete}
         isFavoriteBusy={isFavoriteBusy}
         favoriteError={favoriteError}
         onToggleFavorite={() => void toggleFavorite()}
         onRetryFavorite={() => setFavoriteRefresh((value) => value + 1)}
         onChangeAnswer={(answer) => dispatch({ type: "change-answer", answer })}
         onHint={() => {
-          if (completingReview.current || pendingMistakeRef.current) return;
+          if (
+            completingReview.current ||
+            pendingMistakeRef.current ||
+            deletingRef.current
+          )
+            return;
           if (state.hintLevel === 0) {
             dispatch({
               type: "start-hints",
@@ -604,7 +702,11 @@ function App({
           }
         }}
         onSkip={() => {
-          if (!completingReview.current && !pendingMistakeRef.current)
+          if (
+            !completingReview.current &&
+            !pendingMistakeRef.current &&
+            !deletingRef.current
+          )
             dispatch({ type: "skip-question" });
         }}
         onSubmit={submitAnswer}
@@ -667,8 +769,25 @@ function App({
               {reviewWriteError ? (
                 <Text role="alert">{reviewWriteError}</Text>
               ) : null}
+              {deleteError ? <Text role="alert">{deleteError}</Text> : null}
               {content}
             </Stack>
+            <AlertDialog
+              isOpen={deleteTarget !== null}
+              onOpenChange={(open) => {
+                if (!open && !deletingRef.current) setDeleteTarget(null);
+              }}
+              title="从单词本删除这个单词？"
+              description={
+                deleteTarget
+                  ? `确认后将从当前单词本永久删除“${deleteTarget.entry.english} — ${deleteTarget.entry.chinese}”。`
+                  : "确认后将从当前单词本永久删除该单词。"
+              }
+              actionLabel="删除单词"
+              cancelLabel="取消"
+              isActionLoading={isDeleting}
+              onAction={() => void confirmDelete()}
+            />
           </LayoutContent>
         }
       />

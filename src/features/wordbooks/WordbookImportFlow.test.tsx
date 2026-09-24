@@ -15,6 +15,7 @@ function service(overrides?: Partial<WordbookService>): WordbookService {
     importWordbook: vi.fn(async (request) => ({
       wordbook: { id: 1, name: request.name, entryCount: 3 },
     })),
+    deleteWordbookEntry: vi.fn(async () => true),
     sampleWordbook: vi.fn(async () => []),
     addFavorite: vi.fn(async (english, chinese) => ({
       id: 1,

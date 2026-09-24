@@ -49,6 +49,7 @@ export type AppAction =
   | { type: "advance-hint" }
   | { type: "skip-question" }
   | { type: "continue-after-skip"; elapsedSeconds: number }
+  | { type: "delete-question"; reviewId: number; elapsedSeconds: number }
   | { type: "back-to-setup" };
 
 export const initialState: AppState = {
@@ -87,6 +88,41 @@ export function appReducer(state: AppState, action: AppAction): AppState {
 
   if (state.phase !== "practice") {
     return state;
+  }
+
+  if (action.type === "delete-question") {
+    const question = state.questions[state.questionIndex];
+    if (question.reviewId !== action.reviewId) return state;
+    const questions = state.questions.filter(
+      (_, index) => index !== state.questionIndex,
+    );
+    const errorCount = state.errorCount - state.questionErrorCount;
+    const skippedCount = state.skippedCount - Number(state.isAnswerRevealed);
+    if (state.questionIndex === questions.length) {
+      return {
+        phase: "summary",
+        mode: state.mode,
+        correctCount: state.correctCount,
+        totalCount: questions.length,
+        errorCount,
+        hintCount: state.hintCount,
+        skippedCount,
+        elapsedSeconds: action.elapsedSeconds,
+      };
+    }
+    return {
+      ...state,
+      questions,
+      answer: "",
+      error: null,
+      errorCount,
+      questionErrorCount: 0,
+      questionHintCount: 0,
+      skippedCount,
+      isAnswerRevealed: false,
+      hintLevel: 0,
+      hints: null,
+    };
   }
 
   if (action.type === "change-answer") {

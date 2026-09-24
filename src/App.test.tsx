@@ -45,6 +45,12 @@ function createService(options?: {
       ];
       return { wordbook: imported };
     }),
+    deleteWordbookEntry: vi.fn(async (wordbookId: number, entryId: number) => {
+      const entries = samples[wordbookId] ?? [];
+      const found = entries.some((entry) => entry.id === entryId);
+      samples[wordbookId] = entries.filter((entry) => entry.id !== entryId);
+      return found;
+    }),
     sampleWordbook: vi.fn(
       async (wordbookId: number) => samples[wordbookId] ?? [],
     ),
@@ -1332,5 +1338,96 @@ describe("App wordbook practice", () => {
     expect(vi.mocked(service.completeReview).mock.calls[0]?.[0]).toEqual(
       vi.mocked(service.completeReview).mock.calls[1]?.[0],
     );
+  });
+  it("confirms deleting only the current wordbook entry and advances without counting its mistake or skip", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 2 }],
+      samples: {
+        1: [
+          { id: 1, english: "apple", chinese: "苹果" },
+          { id: 2, english: "book", chinese: "书" },
+        ],
+      },
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.type(screen.getByLabelText("英文答案"), "wrong{Enter}");
+    await screen.findByText("答案不完全匹配，请检查后重试。");
+    await user.click(
+      screen.getByRole("button", { name: "从单词本删除当前单词" }),
+    );
+    expect(screen.getByRole("alertdialog")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(service.deleteWordbookEntry).not.toHaveBeenCalled();
+    expect(screen.getByText("0 / 2")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "从单词本删除当前单词" }),
+    );
+    await user.click(screen.getByRole("button", { name: "删除单词" }));
+    await waitFor(() =>
+      expect(service.deleteWordbookEntry).toHaveBeenCalledWith(1, 1),
+    );
+    expect(await screen.findByText("0 / 1")).toBeInTheDocument();
+    await user.type(screen.getByLabelText("英文答案"), "book{Enter}");
+    expect(await screen.findByText("答对题数：1 / 1")).toBeInTheDocument();
+    expect(screen.getByText("错误次数：0")).toBeInTheDocument();
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "再练一轮" }));
+    expect(await screen.findByText("0 / 1")).toBeInTheDocument();
+  });
+
+  it("deletes a revealed skipped question without submitting a review outcome", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(screen.getByRole("button", { name: "跳过" }));
+    await user.click(
+      screen.getByRole("button", { name: "从单词本删除当前单词" }),
+    );
+    await user.click(screen.getByRole("button", { name: "删除单词" }));
+    expect(await screen.findByText("答对题数：0 / 0")).toBeInTheDocument();
+    expect(screen.getByText("跳过次数：0")).toBeInTheDocument();
+    expect(service.completeReview).not.toHaveBeenCalled();
+  });
+
+  it("keeps a deleted question on failure and hides deletion outside wordbook practice", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+      favorites: [{ id: 21, english: "apple", chinese: "苹果" }],
+    });
+    vi.mocked(service.deleteWordbookEntry).mockRejectedValueOnce(
+      new Error("磁盘不可写"),
+    );
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.click(
+      screen.getByRole("button", { name: "从单词本删除当前单词" }),
+    );
+    await user.click(screen.getByRole("button", { name: "删除单词" }));
+    expect(await screen.findByText("删除失败：磁盘不可写")).toHaveAttribute(
+      "role",
+      "alert",
+    );
+    expect(screen.getByText("0 / 1")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "从单词本删除当前单词" }),
+    );
+    await user.click(screen.getByRole("button", { name: "删除单词" }));
+    expect(await screen.findByText("答对题数：0 / 0")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "返回模式选择" }));
+    await user.click(screen.getByRole("combobox", { name: "练习来源" }));
+    await user.click(await screen.findByRole("option", { name: "收藏夹" }));
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    expect(await screen.findByText("0 / 1")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "从单词本删除当前单词" }),
+    ).not.toBeInTheDocument();
   });
 });

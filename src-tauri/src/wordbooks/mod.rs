@@ -56,6 +56,17 @@ fn map_repository_error(error: repository::RepositoryError) -> CommandError {
 }
 
 #[tauri::command]
+pub fn delete_wordbook_entry(
+    wordbook_id: i64,
+    entry_id: i64,
+    repository: State<'_, WordbookRepository>,
+) -> Result<bool, CommandError> {
+    repository
+        .delete_wordbook_entry(wordbook_id, entry_id)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
 pub fn add_favorite(
     english: String,
     chinese: String,

@@ -1,5 +1,6 @@
 import { Button } from "@astryxdesign/core/Button";
 import { Heading } from "@astryxdesign/core/Heading";
+import { IconButton } from "@astryxdesign/core/IconButton";
 import { ProgressBar } from "@astryxdesign/core/ProgressBar";
 import { Section } from "@astryxdesign/core/Section";
 import { Stack } from "@astryxdesign/core/Stack";
@@ -21,6 +22,9 @@ type PracticeQuestionProps = {
   favoriteError: string | null;
   onToggleFavorite: () => void;
   onRetryFavorite: () => void;
+  canDelete: boolean;
+  isDeleting: boolean;
+  onRequestDelete: () => void;
   onHint: () => void;
   onSkip: () => void;
   onSubmit: () => void;
@@ -38,6 +42,9 @@ export function PracticeQuestion({
   favoriteError,
   onToggleFavorite,
   onRetryFavorite,
+  canDelete,
+  isDeleting,
+  onRequestDelete,
   onHint,
   onSkip,
   onSubmit,
@@ -81,6 +88,18 @@ export function PracticeQuestion({
                 isDisabled={isFavorite === null}
                 onPressedChange={onToggleFavorite}
               />
+              {canDelete ? (
+                <IconButton
+                  label="从单词本删除当前单词"
+                  tooltip="从单词本删除当前单词"
+                  icon={<Text color="secondary">🗑</Text>}
+                  size="sm"
+                  variant="ghost"
+                  isLoading={isDeleting}
+                  isDisabled={isCompleting || isBlocked}
+                  onClick={onRequestDelete}
+                />
+              ) : null}
             </Stack>
           </Stack>
           {favoriteError ? <Text role="alert">{favoriteError}</Text> : null}
