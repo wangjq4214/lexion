@@ -25,16 +25,73 @@ function start(entries = questions) {
   });
 }
 
-describe("deleting a practice question", () => {
-  it("removes the active question, rolls back its errors and skip, but retains used hints", () => {
+describe("wrong answer reveal", () => {
+  it("keeps the submitted answer and hints until the learner continues", () => {
     let state = start();
-    state = appReducer(state, { type: "change-answer", answer: "wrong" });
-    state = appReducer(state, { type: "submit-answer", elapsedSeconds: 1 });
     state = appReducer(state, {
       type: "start-hints",
       hints: ["a _ _ _ _", "a p _ _ _"],
     });
-    state = appReducer(state, { type: "skip-question" });
+    state = appReducer(state, { type: "change-answer", answer: "aple" });
+    state = appReducer(state, { type: "submit-answer", elapsedSeconds: 1 });
+    expect(state).toMatchObject({
+      answer: "aple",
+      revealReason: "wrong",
+      errorCount: 1,
+      questionErrorCount: 1,
+      hintCount: 1,
+      skippedCount: 0,
+      correctCount: 0,
+    });
+    expect(appReducer(state, { type: "change-answer", answer: "apple" })).toBe(
+      state,
+    );
+    expect(appReducer(state, { type: "advance-hint" })).toBe(state);
+    state = appReducer(state, {
+      type: "continue-after-reveal",
+      elapsedSeconds: 5,
+    });
+    expect(state).toMatchObject({
+      phase: "practice",
+      questionIndex: 1,
+      answer: "",
+      revealReason: null,
+      errorCount: 1,
+      skippedCount: 0,
+      correctCount: 0,
+    });
+  });
+
+  it("waits for continuation on the last wrong answer", () => {
+    let state = start([questions[0]]);
+    state = appReducer(state, { type: "change-answer", answer: "" });
+    state = appReducer(state, { type: "submit-answer", elapsedSeconds: 1 });
+    expect(state.phase).toBe("practice");
+    state = appReducer(state, {
+      type: "continue-after-reveal",
+      elapsedSeconds: 9,
+    });
+    expect(state).toMatchObject({
+      phase: "summary",
+      totalCount: 1,
+      correctCount: 0,
+      errorCount: 1,
+      skippedCount: 0,
+      elapsedSeconds: 9,
+    });
+  });
+});
+
+describe("deleting a practice question", () => {
+  it("rolls back wrong-question errors without treating it as a skip", () => {
+    let state = start();
+    state = appReducer(state, { type: "change-answer", answer: "wrong" });
+    state = appReducer(state, { type: "submit-answer", elapsedSeconds: 1 });
+    expect(state).toMatchObject({ revealReason: "wrong", hintCount: 0 });
+    expect(
+      appReducer(state, { type: "submit-answer", elapsedSeconds: 2 }),
+    ).toBe(state);
+    expect(appReducer(state, { type: "skip-question" })).toBe(state);
     state = appReducer(state, {
       type: "delete-question",
       reviewId: 1,
@@ -46,10 +103,10 @@ describe("deleting a practice question", () => {
       questions: [questions[1]],
       errorCount: 0,
       questionErrorCount: 0,
-      hintCount: 1,
+      hintCount: 0,
       skippedCount: 0,
       answer: "",
-      isAnswerRevealed: false,
+      revealReason: null,
     });
   });
 

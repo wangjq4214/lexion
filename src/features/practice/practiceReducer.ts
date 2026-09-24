@@ -15,14 +15,13 @@ export type PracticeState = {
   questions: Question[];
   questionIndex: number;
   answer: string;
-  error: string | null;
   errorCount: number;
   questionErrorCount: number;
   questionHintCount: number;
   hintCount: number;
   correctCount: number;
   skippedCount: number;
-  isAnswerRevealed: boolean;
+  revealReason: "wrong" | "skip" | null;
   hintLevel: 0 | 1 | 2;
   hints: [string, string] | null;
 };
@@ -48,7 +47,7 @@ export type AppAction =
   | { type: "start-hints"; hints: [string, string] }
   | { type: "advance-hint" }
   | { type: "skip-question" }
-  | { type: "continue-after-skip"; elapsedSeconds: number }
+  | { type: "continue-after-reveal"; elapsedSeconds: number }
   | { type: "delete-question"; reviewId: number; elapsedSeconds: number }
   | { type: "back-to-setup" };
 
@@ -69,14 +68,13 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       questions: action.questions,
       questionIndex: 0,
       answer: "",
-      error: null,
       errorCount: 0,
       questionErrorCount: 0,
       questionHintCount: 0,
       hintCount: 0,
       correctCount: 0,
       skippedCount: 0,
-      isAnswerRevealed: false,
+      revealReason: null,
       hintLevel: 0,
       hints: null,
     };
@@ -97,7 +95,8 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       (_, index) => index !== state.questionIndex,
     );
     const errorCount = state.errorCount - state.questionErrorCount;
-    const skippedCount = state.skippedCount - Number(state.isAnswerRevealed);
+    const skippedCount =
+      state.skippedCount - Number(state.revealReason === "skip");
     if (state.questionIndex === questions.length) {
       return {
         phase: "summary",
@@ -114,26 +113,25 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       ...state,
       questions,
       answer: "",
-      error: null,
       errorCount,
       questionErrorCount: 0,
       questionHintCount: 0,
       skippedCount,
-      isAnswerRevealed: false,
+      revealReason: null,
       hintLevel: 0,
       hints: null,
     };
   }
 
   if (action.type === "change-answer") {
-    return state.isAnswerRevealed
+    return state.revealReason !== null
       ? state
-      : { ...state, answer: action.answer, error: null };
+      : { ...state, answer: action.answer };
   }
 
   if (action.type === "start-hints") {
     if (
-      state.isAnswerRevealed ||
+      state.revealReason !== null ||
       state.hintLevel !== 0 ||
       state.questions[state.questionIndex].direction !== "zh-to-en"
     )
@@ -148,7 +146,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
   }
 
   if (action.type === "advance-hint") {
-    if (state.isAnswerRevealed || !state.hints || state.hintLevel === 0)
+    if (state.revealReason !== null || !state.hints || state.hintLevel === 0)
       return state;
     if (state.hintLevel === 1) {
       return {
@@ -160,7 +158,7 @@ export function appReducer(state: AppState, action: AppAction): AppState {
     }
     return {
       ...state,
-      isAnswerRevealed: true,
+      revealReason: "skip",
       hintCount: state.hintCount + 1,
       questionHintCount: state.questionHintCount + 1,
       skippedCount: state.skippedCount + 1,
@@ -168,28 +166,28 @@ export function appReducer(state: AppState, action: AppAction): AppState {
   }
 
   if (action.type === "skip-question") {
-    return state.isAnswerRevealed
+    return state.revealReason !== null
       ? state
       : {
           ...state,
-          isAnswerRevealed: true,
+          revealReason: "skip",
           skippedCount: state.skippedCount + 1,
         };
   }
 
   if (
     action.type === "submit-answer" ||
-    action.type === "continue-after-skip"
+    action.type === "continue-after-reveal"
   ) {
-    if (action.type === "continue-after-skip" && !state.isAnswerRevealed)
+    if (action.type === "continue-after-reveal" && state.revealReason === null)
       return state;
     if (action.type === "submit-answer") {
-      if (state.isAnswerRevealed) return state;
+      if (state.revealReason !== null) return state;
       const currentQuestion = state.questions[state.questionIndex];
       if (!isExactAnswer(state.answer, currentQuestion)) {
         return {
           ...state,
-          error: "答案不完全匹配，请检查后重试。",
+          revealReason: "wrong",
           errorCount: state.errorCount + 1,
           questionErrorCount: state.questionErrorCount + 1,
         };
@@ -218,10 +216,9 @@ export function appReducer(state: AppState, action: AppAction): AppState {
       questionHintCount: 0,
       questionIndex: state.questionIndex + 1,
       answer: "",
-      error: null,
       hintLevel: 0,
       hints: null,
-      isAnswerRevealed: false,
+      revealReason: null,
     };
   }
 

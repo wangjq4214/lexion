@@ -514,7 +514,6 @@ function App({
       await withWriteTimeout(write, "错题记录尚未完成，请稍后重试。");
       pendingMistakeRef.current = null;
       setPendingMistake(null);
-      dispatch({ type: "submit-answer", elapsedSeconds });
     } catch (error) {
       setMistakeWriteError(
         `记录错题失败：${error instanceof Error ? error.message : String(error)}`,
@@ -526,7 +525,7 @@ function App({
   };
 
   const completeQuestion = async (
-    type: "submit-answer" | "continue-after-skip",
+    type: "submit-answer" | "continue-after-reveal",
   ) => {
     if (
       state.phase !== "practice" ||
@@ -553,7 +552,8 @@ function App({
           reviewId: question.reviewId,
           errorCount: state.questionErrorCount,
           hintCount: state.questionHintCount,
-          skipped: type === "continue-after-skip",
+          skipped:
+            type === "continue-after-reveal" && state.revealReason === "skip",
         }),
         "复习进度尚未保存，请稍后重试。",
       );
@@ -571,7 +571,7 @@ function App({
   const submitAnswer = () => {
     if (
       state.phase !== "practice" ||
-      state.isAnswerRevealed ||
+      state.revealReason !== null ||
       completingReview.current ||
       deletingRef.current ||
       pendingMistakeRef.current
@@ -586,6 +586,7 @@ function App({
       };
       pendingMistakeRef.current = submission;
       setPendingMistake(submission);
+      dispatch({ type: "submit-answer", elapsedSeconds });
       void saveMistake(submission);
       return;
     }
@@ -710,7 +711,7 @@ function App({
             dispatch({ type: "skip-question" });
         }}
         onSubmit={submitAnswer}
-        onContinue={() => void completeQuestion("continue-after-skip")}
+        onContinue={() => void completeQuestion("continue-after-reveal")}
       />
     );
   } else {

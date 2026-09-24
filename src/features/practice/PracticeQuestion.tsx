@@ -7,7 +7,8 @@ import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { ToggleButton } from "@astryxdesign/core/ToggleButton";
-import { getQuestionPrompt } from "../../domain/practice";
+import { type AnswerSegment, diffAnswers } from "../../domain/answerDiff";
+import { getExpectedAnswer, getQuestionPrompt } from "../../domain/practice";
 import type { PracticeState } from "./practiceReducer";
 import { formatElapsedTime, modeLabels } from "./presentation";
 
@@ -31,6 +32,45 @@ type PracticeQuestionProps = {
   onContinue: () => void;
 };
 
+function renderDiff(parts: AnswerSegment[]) {
+  if (parts.length === 0) return "（未填写）";
+  let position = 0;
+  return parts.map((part) => {
+    const offset = position;
+    position += part.text.length;
+    return part.changed ? (
+      <mark
+        key={`${offset}:${part.text}`}
+        style={{
+          backgroundColor: "var(--color-error-muted)",
+          color: "var(--color-text-primary)",
+        }}
+      >
+        {part.text}
+      </mark>
+    ) : (
+      part.text
+    );
+  });
+}
+
+function describeChanges(parts: AnswerSegment[]): string {
+  let position = 0;
+  const changes: string[] = [];
+  for (const part of parts) {
+    const characters = Array.from(part.text);
+    if (part.changed) {
+      const sample = characters.slice(0, 20).join("");
+      const range =
+        characters.length === 1
+          ? `第 ${position + 1} 位`
+          : `第 ${position + 1} 至 ${position + characters.length} 位`;
+      changes.push(`${range}「${sample}${characters.length > 20 ? "…" : ""}」`);
+    }
+    position += characters.length;
+  }
+  return changes.length ? changes.join("、") : "无";
+}
 export function PracticeQuestion({
   state,
   elapsedSeconds,
@@ -52,6 +92,10 @@ export function PracticeQuestion({
 }: PracticeQuestionProps) {
   const question = state.questions[state.questionIndex];
   const expectsEnglish = question.direction === "zh-to-en";
+  const difference =
+    state.revealReason === "wrong"
+      ? diffAnswers(state.answer, getExpectedAnswer(question))
+      : null;
   return (
     <Stack gap={6}>
       <Section paddingBlockStart={6} paddingBlockEnd={0}>
@@ -110,11 +154,26 @@ export function PracticeQuestion({
               onClick={onRetryFavorite}
             />
           ) : null}
-          {state.isAnswerRevealed ? (
+          {state.revealReason !== null ? (
             <Stack gap={2} role="status" aria-live="polite">
-              <Text type="supporting">本题答案</Text>
-              <Text>英文：{question.entry.english}</Text>
-              <Text>中文释义：{question.entry.chinese}</Text>
+              {difference ? (
+                <>
+                  <Text type="supporting">本题答错，标记部分为答案差异</Text>
+                  <Text>你的答案：{renderDiff(difference.submitted)}</Text>
+                  <Text>正确答案：{renderDiff(difference.expected)}</Text>
+                  <Text type="supporting">
+                    差异说明：你的答案需核对{" "}
+                    {describeChanges(difference.submitted)}； 正确答案需核对{" "}
+                    {describeChanges(difference.expected)}。
+                  </Text>
+                </>
+              ) : (
+                <>
+                  <Text type="supporting">本题答案</Text>
+                  <Text>英文：{question.entry.english}</Text>
+                  <Text>中文释义：{question.entry.chinese}</Text>
+                </>
+              )}
               <Stack direction="horizontal" gap={3} justify="end">
                 <Button
                   label={
@@ -123,6 +182,7 @@ export function PracticeQuestion({
                       : "下一题"
                   }
                   variant="primary"
+                  isDisabled={isBlocked}
                   isLoading={isCompleting}
                   onClick={onContinue}
                 />
@@ -140,12 +200,6 @@ export function PracticeQuestion({
                 placeholder={
                   expectsEnglish ? "输入完整英文单词" : "输入完整中文释义"
                 }
-                status={
-                  state.error
-                    ? { type: "error", message: state.error }
-                    : undefined
-                }
-                statusVariant="detached"
                 hasAutoFocus
                 width="100%"
               />
