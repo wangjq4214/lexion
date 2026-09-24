@@ -1,3 +1,4 @@
+import { AlertDialog } from "@astryxdesign/core/AlertDialog";
 import { Button } from "@astryxdesign/core/Button";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Section } from "@astryxdesign/core/Section";
@@ -5,6 +6,7 @@ import { Selector } from "@astryxdesign/core/Selector";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
+import { useState } from "react";
 import type { WordbookService, WordbookSummary } from "../../data/wordbooks";
 import type { PracticeMode, PracticeSource } from "../../domain/practice";
 import { WordbookImportFlow } from "../wordbooks/WordbookImportFlow";
@@ -28,6 +30,7 @@ type PracticeSetupProps = {
   onOpenFavorites: () => void;
   onOpenMistakes: () => void;
   onImported: (id: number) => Promise<void>;
+  onDeleted: () => Promise<void>;
   onSelectMode: (mode: PracticeMode) => void;
   countSelection: string;
   onCountSelectionChange: (value: string) => void;
@@ -50,6 +53,7 @@ export function PracticeSetup({
   onOpenFavorites,
   onOpenMistakes,
   onImported,
+  onDeleted,
   onSelectMode,
   countSelection,
   onCountSelectionChange,
@@ -60,6 +64,29 @@ export function PracticeSetup({
   isStarting,
   onStart,
 }: PracticeSetupProps) {
+  const [deleteTarget, setDeleteTarget] = useState<WordbookSummary | null>(
+    null,
+  );
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const selectedWordbook = wordbooks.find(({ id }) => id === activeWordbookId);
+
+  const confirmDelete = async () => {
+    if (!deleteTarget || isDeleting) return;
+    setIsDeleting(true);
+    setDeleteError(null);
+    try {
+      const deleted = await wordbookService.deleteWordbook(deleteTarget.id);
+      if (!deleted) throw new Error("单词本已不存在，请刷新后重试。");
+      await onDeleted();
+      setDeleteTarget(null);
+    } catch (error) {
+      setDeleteError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
   return (
     <Stack gap={6}>
       <Section paddingBlockStart={6} paddingBlockEnd={0}>
@@ -86,7 +113,11 @@ export function PracticeSetup({
             <Selector
               label="练习来源"
               options={[
-                { value: "wordbook", label: "单词本" },
+                {
+                  value: "wordbook",
+                  label: "单词本",
+                  disabled: wordbooks.length === 0,
+                },
                 { value: "favorites", label: "收藏夹" },
                 { value: "mistakes", label: "错题本" },
               ]}
@@ -96,22 +127,47 @@ export function PracticeSetup({
               width="100%"
             />
             {practiceSource === "wordbook" ? (
-              <Selector
-                label="当前单词本"
-                options={wordbooks.map((wordbook) => ({
-                  value: String(wordbook.id),
-                  label: wordbook.name,
-                  description: `${wordbook.entryCount} 个词条`,
-                }))}
-                value={
-                  activeWordbookId === null
-                    ? undefined
-                    : String(activeWordbookId)
-                }
-                isDisabled={isStarting}
-                onChange={(value) => onSelectWordbook(Number(value))}
-                width="100%"
-              />
+              <Stack gap={2}>
+                {wordbooks.length === 0 ? (
+                  <Text color="secondary">
+                    请先导入单词本，或选择收藏夹、错题本。
+                  </Text>
+                ) : (
+                  <>
+                    <Selector
+                      label="当前单词本"
+                      options={wordbooks.map((wordbook) => ({
+                        value: String(wordbook.id),
+                        label: wordbook.name,
+                        description: `${wordbook.entryCount} 个词条`,
+                      }))}
+                      value={
+                        activeWordbookId === null
+                          ? undefined
+                          : String(activeWordbookId)
+                      }
+                      isDisabled={isStarting || isDeleting}
+                      onChange={(value) => onSelectWordbook(Number(value))}
+                      width="100%"
+                    />
+                    {selectedWordbook ? (
+                      <Button
+                        label="删除当前单词本"
+                        variant="ghost"
+                        size="sm"
+                        isDisabled={isStarting || isDeleting}
+                        onClick={() => {
+                          setDeleteError(null);
+                          setDeleteTarget(selectedWordbook);
+                        }}
+                      />
+                    ) : null}
+                    {deleteError ? (
+                      <Text role="alert">{deleteError}</Text>
+                    ) : null}
+                  </>
+                )}
+              </Stack>
             ) : null}
           </Stack>
           <Stack gap={3}>
@@ -178,12 +234,27 @@ export function PracticeSetup({
               label="开始练习"
               variant="primary"
               isLoading={isStarting}
-              isDisabled={practiceCount === null}
+              isDisabled={
+                practiceCount === null ||
+                (practiceSource === "wordbook" && !selectedWordbook)
+              }
               onClick={onStart}
             />
           </Stack>
         </Stack>
       </Section>
+      <AlertDialog
+        isOpen={deleteTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !isDeleting) setDeleteTarget(null);
+        }}
+        title="删除单词本？"
+        description={`确认后将永久删除“${deleteTarget?.name ?? ""}”及其中的词条。收藏夹和错题本不受影响。${deleteError ? `删除失败：${deleteError}` : ""}`}
+        actionLabel="删除单词本"
+        cancelLabel="取消"
+        isActionLoading={isDeleting}
+        onAction={() => void confirmDelete()}
+      />
     </Stack>
   );
 }

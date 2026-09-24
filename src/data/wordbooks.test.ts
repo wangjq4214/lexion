@@ -7,6 +7,20 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 beforeEach(() => {
   vi.mocked(invoke).mockReset();
 });
+describe("wordbook deletion service contract", () => {
+  it("deletes by ID and maps database errors", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(true).mockRejectedValueOnce({
+      kind: "database",
+      message: "删除失败",
+    });
+    await expect(tauriWordbookService.deleteWordbook(3)).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledWith("delete_wordbook", { wordbookId: 3 });
+    await expect(tauriWordbookService.deleteWordbook(3)).rejects.toMatchObject({
+      kind: "database",
+      message: "删除失败",
+    });
+  });
+});
 
 describe("review scheduling service contract", () => {
   it("exposes the adjustable retention target", async () => {

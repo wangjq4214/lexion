@@ -32,7 +32,7 @@
   - contains vocabulary-entry
 
 ### favorites-collection
-- **Definition:** The application's single collection of saved word-and-meaning pairs for later review and practice. Its contents remain available when the source wordbook is replaced by another import.
+- **Definition:** The application's single collection of saved word-and-meaning pairs for later review and practice. Its contents remain available for browsing and practice when the source wordbook is replaced or deleted, including when no wordbook remains.
 - **Relationships:**
   - contains favorite-entry
 
@@ -42,14 +42,14 @@
   - belongs to favorites-collection
 
 ### practice-source
-- **Definition:** The selected source for drawing a practice round: the active wordbook, the single favorites collection, or the mistake collection.
+- **Definition:** The selected source for drawing a practice round: the active wordbook, the single favorites collection, or the mistake collection. With no wordbook present, a populated favorites or mistake collection remains available for browsing and practice; when both collections are empty, the main screen offers only wordbook import. The wordbook source is unavailable until a wordbook is imported.
 - **Relationships:**
   - references active-wordbook
   - references favorites-collection
   - references mistake-collection
 
 ### mistake-collection
-- **Definition:** The application's persistent collection of word-and-meaning pairs on which the learner has submitted incorrect answers. It can be browsed and selected as a source of practice; its records survive replacement of the originating wordbook.
+- **Definition:** The application's persistent collection of word-and-meaning pairs on which the learner has submitted incorrect answers. It can be browsed and selected as a source of practice; its records remain available when the originating wordbook is replaced or deleted, including when no wordbook remains.
 - **Synonyms:** 错题本
 - **Relationships:**
   - contains mistake-entry

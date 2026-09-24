@@ -206,6 +206,23 @@ impl WordbookRepository {
             entry_count: entries.len() as i64,
         })
     }
+
+    pub fn delete_wordbook(&self, wordbook_id: i64) -> Result<bool, RepositoryError> {
+        if wordbook_id <= 0 {
+            return Err(RepositoryError::Validation("单词本 ID 必须大于零"));
+        }
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        let deleted = transaction.execute("DELETE FROM wordbooks WHERE id = ?1", [wordbook_id])?;
+        if deleted != 0 {
+            transaction.execute(
+                "DELETE FROM review_coverage WHERE source = 'wordbook' AND source_id = ?1",
+                [wordbook_id],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(deleted != 0)
+    }
     pub fn delete_wordbook_entry(
         &self,
         wordbook_id: i64,
@@ -510,6 +527,61 @@ mod tests {
             sample.len()
         );
         assert_eq!(reopened.sample(listed[1].id, 50).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn deleting_wordbook_is_scoped_and_preserves_independent_data() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("words.sqlite");
+        let repository = WordbookRepository::open(&path).unwrap();
+        let pair = [ImportedEntry {
+            english: "Apple".into(),
+            chinese: "苹果".into(),
+        }];
+        let first = repository.replace("first", &pair, false).unwrap();
+        let second = repository.replace("second", &pair, false).unwrap();
+        repository.add_favorite("Apple", "苹果").unwrap();
+        repository.record_mistake("Apple", "苹果").unwrap();
+        let connection = repository.connect().unwrap();
+        for id in [first.id, second.id] {
+            connection.execute(
+                "INSERT INTO review_coverage(source, source_id, normalized_english, chinese) VALUES ('wordbook', ?1, 'apple', '苹果')",
+                [id],
+            ).unwrap();
+        }
+        drop(connection);
+
+        assert!(matches!(
+            repository.delete_wordbook(0),
+            Err(RepositoryError::Validation(_))
+        ));
+        assert!(!repository.delete_wordbook(i64::MAX).unwrap());
+        assert!(repository.delete_wordbook(first.id).unwrap());
+        assert!(!repository.delete_wordbook(first.id).unwrap());
+        let reopened = WordbookRepository::open(&path).unwrap();
+        assert_eq!(reopened.list().unwrap().len(), 1);
+        assert_eq!(reopened.list().unwrap()[0].id, second.id);
+        assert!(reopened.sample(first.id, 10).unwrap().is_empty());
+        assert_eq!(reopened.sample(second.id, 10).unwrap().len(), 1);
+        assert_eq!(reopened.list_favorites().unwrap().len(), 1);
+        assert_eq!(reopened.list_mistakes().unwrap().len(), 1);
+        let connection = reopened.connect().unwrap();
+        let coverage: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM review_coverage WHERE source = 'wordbook' AND source_id = ?1",
+                [first.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(coverage, 0);
+        let other_coverage: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM review_coverage WHERE source = 'wordbook' AND source_id = ?1",
+                [second.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(other_coverage, 1);
     }
 
     #[test]

@@ -21,6 +21,7 @@ pub fn run() {
             wordbooks::list_wordbooks,
             wordbooks::import_wordbook,
             wordbooks::sample_wordbook,
+            wordbooks::delete_wordbook,
             wordbooks::delete_wordbook_entry,
             wordbooks::add_favorite,
             wordbooks::remove_favorite,

@@ -64,6 +64,7 @@ export type WordbookService = {
   listWordbooks(): Promise<WordbookSummary[]>;
   importWordbook(request: ImportWordbookRequest): Promise<ImportWordbookResult>;
   sampleWordbook(wordbookId: number, limit: number): Promise<WordEntry[]>;
+  deleteWordbook(wordbookId: number): Promise<boolean>;
   deleteWordbookEntry(wordbookId: number, entryId: number): Promise<boolean>;
   addFavorite(english: string, chinese: string): Promise<WordEntry>;
   removeFavorite(english: string, chinese: string): Promise<boolean>;
@@ -149,6 +150,11 @@ export const tauriWordbookService: WordbookService = {
         throw commandError(error);
       },
     );
+  },
+  deleteWordbook(wordbookId) {
+    return invoke<boolean>("delete_wordbook", { wordbookId }).catch((error) => {
+      throw commandError(error);
+    });
   },
   deleteWordbookEntry(wordbookId, entryId) {
     return invoke<boolean>("delete_wordbook_entry", {

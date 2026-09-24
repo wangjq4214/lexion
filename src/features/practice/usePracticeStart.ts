@@ -34,7 +34,11 @@ export function usePracticeStart() {
     Number.isInteger(count) && count >= 1 && count <= 255 ? count : null;
 
   const startPractice = async (mode: PracticeMode) => {
-    if (activeWordbookId === null || isStarting || practiceCount === null)
+    if (
+      (practiceSource === "wordbook" && activeWordbookId === null) ||
+      isStarting ||
+      practiceCount === null
+    )
       return;
     setIsStarting(true);
     setPracticeError(null);
