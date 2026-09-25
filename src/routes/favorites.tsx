@@ -11,6 +11,7 @@ function FavoritesPage() {
   const service: WordbookService = props.wordbookService;
   const version = useAtomValue(favoritesVersionAtom);
   const navigate = useNavigate();
+  const fromSetup = Route.useSearch().from === "practice-setup";
   const [entries, setEntries] = useState<WordEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [removingId, setRemovingId] = useState<number | null>(null);
@@ -63,10 +64,14 @@ function FavoritesPage() {
       removingId={removingId}
       onRemove={remove}
       onRetry={load}
-      onBack={() => void navigate({ to: "/" })}
+      backLabel={fromSetup ? "返回练习设置" : "返回首页"}
+      onBack={() => void navigate({ to: fromSetup ? "/practice-setup" : "/" })}
     />
   );
 }
 export const Route = createFileRoute("/favorites")({
+  validateSearch: (search: Record<string, unknown>) => ({
+    from: search.from === "practice-setup" ? "practice-setup" : undefined,
+  }),
   component: FavoritesPage,
 });

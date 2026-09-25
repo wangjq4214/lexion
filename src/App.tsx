@@ -73,7 +73,7 @@ function RouteFrame() {
       round.phase === "setup" &&
       (pathname === "/practice" || pathname === "/summary")
     ) {
-      void navigate({ to: "/", replace: true });
+      void navigate({ to: "/practice-setup", replace: true });
     } else if (round.phase === "practice" && pathname !== "/practice") {
       void navigate({ to: "/practice", replace: true });
     } else if (round.phase === "summary" && pathname === "/practice") {

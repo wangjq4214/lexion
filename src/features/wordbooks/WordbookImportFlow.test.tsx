@@ -8,6 +8,7 @@ function service(overrides?: Partial<WordbookService>): WordbookService {
   return {
     reviewTarget: vi.fn(async () => 0.9),
     setReviewTarget: vi.fn(async () => {}),
+    sampleExam: vi.fn(async () => []),
     schedulePractice: vi.fn(async () => []),
     completeReview: vi.fn(async () => {}),
     pickWorkbookFile: vi.fn(async () => "C:\\imports\\lesson.xls"),

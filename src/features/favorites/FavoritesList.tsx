@@ -12,6 +12,7 @@ type FavoritesListProps = {
   removingId: number | null;
   onRemove: (entry: WordEntry) => void;
   onRetry: () => void;
+  backLabel: string;
   onBack: () => void;
 };
 
@@ -21,6 +22,7 @@ export function FavoritesList({
   removingId,
   onRemove,
   onRetry,
+  backLabel,
   onBack,
 }: FavoritesListProps) {
   return (
@@ -28,7 +30,7 @@ export function FavoritesList({
       <Section paddingBlockStart={6} paddingBlockEnd={0}>
         <Stack direction="horizontal" gap={3} justify="between" wrap="wrap">
           <Heading level={1}>收藏夹</Heading>
-          <Button label="返回练习设置" variant="ghost" onClick={onBack} />
+          <Button label={backLabel} variant="ghost" onClick={onBack} />
         </Stack>
       </Section>
       <Section>

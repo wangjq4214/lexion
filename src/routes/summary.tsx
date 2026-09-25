@@ -17,7 +17,7 @@ function SummaryPage() {
       isStarting={isStarting}
       onBack={() => {
         dispatch({ type: "back-to-setup" });
-        void navigate({ to: "/" });
+        void navigate({ to: "/practice-setup" });
       }}
       onRestart={() => void startPractice(state.mode)}
     />

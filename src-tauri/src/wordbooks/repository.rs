@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
-use super::model::{ImportedEntry, MistakeEntry, WordEntry, WordbookSummary};
+use super::model::{ExamQuestion, ImportedEntry, MistakeEntry, WordEntry, WordbookSummary};
 
 #[path = "schedule.rs"]
 mod schedule;
@@ -373,9 +373,10 @@ impl WordbookRepository {
         let normalized_english = english.to_lowercase();
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
-        // The UI keeps retry IDs only for the active question; bound stale idempotency claims.
+        // Practice retry tokens expire after 30 days. Exam tokens must remain claimed:
+        // a timed-out final check may be retried after the exam has been left open.
         transaction.execute(
-            "DELETE FROM mistake_submissions WHERE created_at < unixepoch() - 2592000",
+            "DELETE FROM mistake_submissions WHERE created_at < unixepoch() - 2592000 AND submission_id NOT LIKE 'exam:%'",
             [],
         )?;
         // Claim the ID before updating the count. SQLite serializes writers, so concurrent
@@ -430,6 +431,75 @@ impl WordbookRepository {
             .prepare("SELECT id, english, chinese FROM mistakes ORDER BY RANDOM() LIMIT ?1")?;
         let rows = statement.query_map([i64::from(limit)], word_entry)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn sample_exam(
+        &self,
+        source: &str,
+        wordbook_id: Option<i64>,
+        en_to_zh_count: u32,
+        zh_to_en_count: u32,
+    ) -> Result<Vec<ExamQuestion>, RepositoryError> {
+        let total = u64::from(en_to_zh_count) + u64::from(zh_to_en_count);
+        if total == 0 {
+            return Err(RepositoryError::Validation("考试题数必须大于零"));
+        }
+        // Table names are selected only from these literals; user input is never interpolated.
+        let (table, source_id) = match (source, wordbook_id) {
+            ("wordbook", Some(id)) if id > 0 => ("entries", id),
+            ("favorites", None) => ("favorites", 0),
+            ("mistakes", None) => ("mistakes", 0),
+            _ => return Err(RepositoryError::Validation("无效的考试来源或单词本")),
+        };
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        if source == "wordbook" {
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM wordbooks WHERE id = ?1)",
+                [source_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                return Err(RepositoryError::Validation("单词本不存在"));
+            }
+        }
+        let where_clause = if source == "wordbook" {
+            " WHERE wordbook_id = ?1"
+        } else {
+            " WHERE ?1 = 0"
+        };
+        let available: i64 = transaction.query_row(
+            &format!("SELECT COUNT(*) FROM {table}{where_clause}"),
+            [source_id],
+            |row| row.get(0),
+        )?;
+        if total > available as u64 {
+            return Err(RepositoryError::Validation(
+                "考试题数超过来源可用词条数，请减少题数",
+            ));
+        }
+        let entries: Vec<WordEntry> = {
+            let mut statement = transaction.prepare(&format!(
+                "SELECT id, english, chinese FROM {table}{where_clause} ORDER BY RANDOM() LIMIT ?2"
+            ))?;
+            let rows = statement.query_map(params![source_id, total as i64], word_entry)?;
+            rows.collect::<Result<_, _>>()?
+        };
+        // One randomized draw, then assign each sampled pair exactly one direction.
+        let questions = entries
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| ExamQuestion {
+                entry,
+                direction: if (index as u64) < u64::from(en_to_zh_count) {
+                    "en-to-zh"
+                } else {
+                    "zh-to-en"
+                }
+                .to_owned(),
+            })
+            .collect();
+        Ok(questions)
     }
 
     pub fn sample(&self, wordbook_id: i64, limit: u8) -> Result<Vec<WordEntry>, rusqlite::Error> {
@@ -492,6 +562,178 @@ mod tests {
                 chinese: format!("释义-{index}"),
             })
             .collect()
+    }
+
+    #[test]
+    fn exam_samples_exact_unique_directions_from_each_source() {
+        use std::collections::HashSet;
+
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        let first = repository
+            .replace("first", &entries("first", 300), false)
+            .unwrap();
+        repository
+            .replace("second", &entries("second", 3), false)
+            .unwrap();
+        let questions = repository
+            .sample_exam("wordbook", Some(first.id), 160, 140)
+            .unwrap();
+        assert_eq!(questions.len(), 300);
+        assert_eq!(
+            questions
+                .iter()
+                .filter(|q| q.direction == "en-to-zh")
+                .count(),
+            160
+        );
+        assert_eq!(
+            questions
+                .iter()
+                .filter(|q| q.direction == "zh-to-en")
+                .count(),
+            140
+        );
+        assert_eq!(
+            questions
+                .iter()
+                .map(|q| (&q.entry.english, &q.entry.chinese))
+                .collect::<HashSet<_>>()
+                .len(),
+            300
+        );
+        assert!(questions
+            .iter()
+            .all(|q| q.entry.english.starts_with("first-")));
+        assert_eq!(
+            serde_json::to_value(&questions[0]).unwrap(),
+            serde_json::json!({
+                "entry": questions[0].entry, "direction": questions[0].direction
+            })
+        );
+
+        // Independent collections remain usable without their originating wordbook.
+        repository.add_favorite("standalone", "独立").unwrap();
+        repository.add_favorite("another", "另一项").unwrap();
+        repository.record_mistake("standalone", "独立").unwrap();
+        repository.record_mistake("another", "另一项").unwrap();
+        repository.delete_wordbook(first.id).unwrap();
+        let second_id = repository.list().unwrap()[0].id;
+        repository.delete_wordbook(second_id).unwrap();
+        for source in ["favorites", "mistakes"] {
+            let questions = repository.sample_exam(source, None, 1, 1).unwrap();
+            assert_eq!(questions.len(), 2);
+            assert_ne!(questions[0].entry.id, questions[1].entry.id);
+            assert_eq!(
+                questions
+                    .iter()
+                    .filter(|q| q.direction == "en-to-zh")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                questions
+                    .iter()
+                    .filter(|q| q.direction == "zh-to-en")
+                    .count(),
+                1
+            );
+            assert!(questions
+                .iter()
+                .all(|q| q.entry.english == "standalone" || q.entry.english == "another"));
+        }
+    }
+
+    #[test]
+    fn exam_rejects_invalid_sources_and_insufficient_pool_without_shortening() {
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        let book = repository
+            .replace("book", &entries("one", 2), false)
+            .unwrap();
+        for (source, id, en, zh) in [
+            ("wordbook", Some(book.id), 0, 0),
+            ("wordbook", Some(book.id), 2, 1),
+            ("wordbook", Some(book.id), u32::MAX, u32::MAX),
+            ("favorites", None, 1, 0),
+            ("mistakes", None, 0, 1),
+            ("wordbook", None, 1, 0),
+            ("wordbook", Some(0), 1, 0),
+            ("wordbook", Some(i64::MAX), 1, 0),
+            ("favorites", Some(book.id), 1, 0),
+            ("invalid", None, 1, 0),
+        ] {
+            assert!(matches!(
+                repository.sample_exam(source, id, en, zh),
+                Err(RepositoryError::Validation(_))
+            ));
+        }
+        assert_eq!(
+            repository
+                .sample_exam("wordbook", Some(book.id), 0, 2)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            repository
+                .sample_exam("wordbook", Some(book.id), 2, 0)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn exam_sampling_never_changes_review_tables_or_mistakes() {
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        let book = repository
+            .replace("book", &entries("one", 2), false)
+            .unwrap();
+        repository.add_favorite("independent", "独立").unwrap();
+        repository.record_mistake("independent", "独立").unwrap();
+        let scheduled = repository
+            .schedule_practice("wordbook", Some(book.id), 1, "en-to-zh")
+            .unwrap();
+        repository
+            .complete_review(scheduled[0].review_id, 0, 0, false)
+            .unwrap();
+        let snapshot = || {
+            let connection = repository.connect().unwrap();
+            let tables = [
+                "review_coverage",
+                "review_memory",
+                "pending_reviews",
+                "mistakes",
+            ];
+            tables.map(|table| {
+                let mut statement = connection
+                    .prepare(&format!("SELECT * FROM {table} ORDER BY 1"))
+                    .unwrap();
+                let columns = statement.column_count();
+                statement
+                    .query_map([], |row| {
+                        (0..columns)
+                            .map(|i| row.get::<_, rusqlite::types::Value>(i))
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<Vec<_>>>()
+                    .unwrap()
+            })
+        };
+        let before = snapshot();
+        repository
+            .sample_exam("wordbook", Some(book.id), 1, 1)
+            .unwrap();
+        repository.sample_exam("favorites", None, 1, 0).unwrap();
+        repository.sample_exam("mistakes", None, 0, 1).unwrap();
+        assert!(matches!(
+            repository.sample_exam("wordbook", Some(book.id), 2, 1),
+            Err(RepositoryError::Validation(_))
+        ));
+        assert_eq!(snapshot(), before);
     }
 
     #[test]
@@ -1039,6 +1281,34 @@ mod tests {
         drop(repository);
         let reopened = WordbookRepository::open(path).unwrap();
         assert_eq!(reopened.list_mistakes().unwrap()[0].error_count, 2);
+    }
+
+    #[test]
+    fn exam_submission_claims_survive_practice_token_cleanup() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("words.sqlite");
+        let repository = WordbookRepository::open(&path).unwrap();
+        repository
+            .record_mistake_once("apple", "苹果", "exam:one")
+            .unwrap();
+        repository
+            .connect()
+            .unwrap()
+            .execute(
+                "UPDATE mistake_submissions SET created_at = 0 WHERE submission_id = 'exam:one'",
+                [],
+            )
+            .unwrap();
+        repository
+            .record_mistake_once("book", "书", "practice:new")
+            .unwrap();
+        drop(repository);
+        let reopened = WordbookRepository::open(path).unwrap();
+        let repeated = reopened
+            .record_mistake_once("apple", "苹果", "exam:one")
+            .unwrap();
+        assert_eq!(repeated.error_count, 1);
+        assert_eq!(reopened.list_mistakes().unwrap().len(), 2);
     }
 
     #[test]

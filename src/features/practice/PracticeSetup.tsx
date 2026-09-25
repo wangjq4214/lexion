@@ -9,7 +9,6 @@ import { TextInput } from "@astryxdesign/core/TextInput";
 import { useState } from "react";
 import type { WordbookService, WordbookSummary } from "../../data/wordbooks";
 import type { PracticeMode, PracticeSource } from "../../domain/practice";
-import { WordbookImportFlow } from "../wordbooks/WordbookImportFlow";
 
 const practiceCountOptions = [
   ...[5, 10, 20, 50].map((count) => ({
@@ -27,9 +26,7 @@ type PracticeSetupProps = {
   onSelectWordbook: (id: number) => void;
   practiceSource: PracticeSource;
   onSelectSource: (source: PracticeSource) => void;
-  onOpenFavorites: () => void;
-  onOpenMistakes: () => void;
-  onImported: (id: number) => Promise<void>;
+  onBack: () => void;
   onDeleted: () => Promise<void>;
   onSelectMode: (mode: PracticeMode) => void;
   countSelection: string;
@@ -50,9 +47,7 @@ export function PracticeSetup({
   onSelectWordbook,
   practiceSource,
   onSelectSource,
-  onOpenFavorites,
-  onOpenMistakes,
-  onImported,
+  onBack,
   onDeleted,
   onSelectMode,
   countSelection,
@@ -95,12 +90,12 @@ export function PracticeSetup({
             <Heading level={1}>Lexicon 单词练习</Heading>
             <Text color="secondary">选择练习内容和方式，开始本轮练习。</Text>
           </Stack>
-          <WordbookImportFlow
-            service={wordbookService}
+          <Button
+            label="返回首页"
             size="sm"
             variant="ghost"
             isDisabled={isStarting}
-            onImported={(result) => onImported(result.wordbook.id)}
+            onClick={onBack}
           />
         </Stack>
       </Section>
@@ -130,7 +125,7 @@ export function PracticeSetup({
               <Stack gap={2}>
                 {wordbooks.length === 0 ? (
                   <Text color="secondary">
-                    请先导入单词本，或选择收藏夹、错题本。
+                    请返回首页导入单词本，或选择收藏夹、错题本。
                   </Text>
                 ) : (
                   <>
@@ -208,25 +203,6 @@ export function PracticeSetup({
                 width="100%"
               />
             ) : null}
-          </Stack>
-          <Stack gap={2}>
-            <Heading level={3}>浏览词库</Heading>
-            <Stack direction="horizontal" gap={2} wrap="wrap" align="start">
-              <Button
-                label="查看收藏夹"
-                variant="ghost"
-                size="sm"
-                isDisabled={isStarting}
-                onClick={onOpenFavorites}
-              />
-              <Button
-                label="查看错题本"
-                variant="ghost"
-                size="sm"
-                isDisabled={isStarting}
-                onClick={onOpenMistakes}
-              />
-            </Stack>
           </Stack>
           <Stack gap={3}>
             {practiceError ? <Text role="alert">{practiceError}</Text> : null}

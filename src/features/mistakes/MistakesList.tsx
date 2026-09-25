@@ -10,6 +10,7 @@ type MistakesListProps = {
   entries: MistakeEntry[] | null;
   error: string | null;
   onRetry: () => void;
+  backLabel: string;
   onBack: () => void;
 };
 
@@ -17,6 +18,7 @@ export function MistakesList({
   entries,
   error,
   onRetry,
+  backLabel,
   onBack,
 }: MistakesListProps) {
   return (
@@ -24,7 +26,7 @@ export function MistakesList({
       <Section paddingBlockStart={6} paddingBlockEnd={0}>
         <Stack direction="horizontal" gap={3} justify="between" wrap="wrap">
           <Heading level={1}>错题本</Heading>
-          <Button label="返回练习设置" variant="ghost" onClick={onBack} />
+          <Button label={backLabel} variant="ghost" onClick={onBack} />
         </Stack>
       </Section>
       <Section>

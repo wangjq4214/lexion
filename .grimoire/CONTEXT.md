@@ -42,7 +42,7 @@
   - belongs to favorites-collection
 
 ### practice-source
-- **Definition:** The selected source for drawing a practice round: the active wordbook, the single favorites collection, or the mistake collection. With no wordbook present, a populated favorites or mistake collection remains available for browsing and practice; when both collections are empty, the main screen offers only wordbook import. The wordbook source is unavailable until a wordbook is imported.
+- **Definition:** The selected source for drawing a practice round: the active wordbook, the single favorites collection, or the mistake collection. With no wordbook present, a populated favorites or mistake collection remains available for browsing and practice. The entry screen offers navigation to practice, exam, mistakes, favorites, and wordbook import; practice setup contains source and mode settings but not collection browsing or import actions. When all sources are empty, learners return home to import a wordbook, and the wordbook source remains unavailable until a wordbook is imported.
 - **Relationships:**
   - references active-wordbook
   - references favorites-collection
@@ -55,7 +55,7 @@
   - contains mistake-entry
 
 ### mistake-entry
-- **Definition:** An English word and Chinese meaning pair with a cumulative error count. Each incorrect answer submission for this pair increments its count; in the agreed wrong-completion flow, a wrong submission ends the attempt, so at most one such increment occurs per question. A skip alone does not increment it. The pair remains available for review and practice after its source wordbook is replaced.
+- **Definition:** An English word and Chinese meaning pair with a cumulative error count. Each incorrect practice answer submission for this pair increments its count; in the agreed wrong-completion flow, a wrong submission ends the attempt, so at most one such increment occurs per question. Incorrect exam questions (including unanswered ones at final checking) also increment the count once per question. A practice skip alone does not increment it. The pair remains available for review and practice after its source wordbook is replaced.
 - **Relationships:**
   - belongs to mistake-collection
 
@@ -67,6 +67,14 @@
   - references vocabulary-entry
   - references favorite-entry
   - references mistake-entry
+
+### exam-round
+- **Definition:** A vocabulary assessment drawing distinct word-and-meaning entries from one selected wordbook, the mistake collection, or the favorites collection, with separately specified counts of English-to-Chinese and Chinese-to-English questions; if the requested total exceeds available entries, the learner must reduce the count rather than repeat entries. Answers are checked together after the learner finishes; blank answers are incorrect, each question has equal weight, and the score is the percentage of correct answers on a 100-point scale. Answer matching follows existing practice rules: English ignores case after trimming, while Chinese must match the stored meaning after trimming. Incorrect exam answers enter the mistake collection, but exam results do not change practice review progress.
+- **Relationships:**
+  - depends on practice-source
+  - contains vocabulary-entry
+  - contains favorite-entry
+  - contains mistake-entry
 
 ### review-outcome
 - **Definition:** A completed practice question's result used to adjust that word's later review: only a first-attempt correct answer without hints counts as an unassisted success; a hint, a wrong-completion outcome, or a skip prompts earlier review. More hint levels shorten the review interval. Mastery is tracked separately for Chinese-to-English and English-to-Chinese questions, but shared for an identical English-and-Chinese pair across practice sources in the same direction; distinct meanings remain distinct pairs. Initial scheduling predicts retention as R(t) = exp(-t / S), with per-pair, per-direction memory stability S updated by outcomes, and schedules review when retention reaches an adjustable target initially set at 90%. Update coefficients remain subject to testing and feedback; this is not a fixed day ladder.

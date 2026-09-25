@@ -10,9 +10,12 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ExamRouteImport } from './routes/exam'
 import { Route as FavoritesRouteImport } from './routes/favorites'
+import { Route as ImportRouteImport } from './routes/import'
 import { Route as MistakesRouteImport } from './routes/mistakes'
 import { Route as PracticeRouteImport } from './routes/practice'
+import { Route as PracticeSetupRouteImport } from './routes/practice-setup'
 import { Route as SummaryRouteImport } from './routes/summary'
 
 const IndexRoute = IndexRouteImport.update({
@@ -20,9 +23,19 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ExamRoute = ExamRouteImport.update({
+  id: '/exam',
+  path: '/exam',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const FavoritesRoute = FavoritesRouteImport.update({
   id: '/favorites',
   path: '/favorites',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ImportRoute = ImportRouteImport.update({
+  id: '/import',
+  path: '/import',
   getParentRoute: () => rootRouteImport,
 } as any)
 const MistakesRoute = MistakesRouteImport.update({
@@ -35,6 +48,11 @@ const PracticeRoute = PracticeRouteImport.update({
   path: '/practice',
   getParentRoute: () => rootRouteImport,
 } as any)
+const PracticeSetupRoute = PracticeSetupRouteImport.update({
+  id: '/practice-setup',
+  path: '/practice-setup',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SummaryRoute = SummaryRouteImport.update({
   id: '/summary',
   path: '/summary',
@@ -43,39 +61,76 @@ const SummaryRoute = SummaryRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/exam': typeof ExamRoute
   '/favorites': typeof FavoritesRoute
+  '/import': typeof ImportRoute
   '/mistakes': typeof MistakesRoute
   '/practice': typeof PracticeRoute
+  '/practice-setup': typeof PracticeSetupRoute
   '/summary': typeof SummaryRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/exam': typeof ExamRoute
   '/favorites': typeof FavoritesRoute
+  '/import': typeof ImportRoute
   '/mistakes': typeof MistakesRoute
   '/practice': typeof PracticeRoute
+  '/practice-setup': typeof PracticeSetupRoute
   '/summary': typeof SummaryRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/exam': typeof ExamRoute
   '/favorites': typeof FavoritesRoute
+  '/import': typeof ImportRoute
   '/mistakes': typeof MistakesRoute
   '/practice': typeof PracticeRoute
+  '/practice-setup': typeof PracticeSetupRoute
   '/summary': typeof SummaryRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/favorites' | '/mistakes' | '/practice' | '/summary'
+  fullPaths:
+    | '/'
+    | '/exam'
+    | '/favorites'
+    | '/import'
+    | '/mistakes'
+    | '/practice'
+    | '/practice-setup'
+    | '/summary'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/favorites' | '/mistakes' | '/practice' | '/summary'
-  id: '__root__' | '/' | '/favorites' | '/mistakes' | '/practice' | '/summary'
+  to:
+    | '/'
+    | '/exam'
+    | '/favorites'
+    | '/import'
+    | '/mistakes'
+    | '/practice'
+    | '/practice-setup'
+    | '/summary'
+  id:
+    | '__root__'
+    | '/'
+    | '/exam'
+    | '/favorites'
+    | '/import'
+    | '/mistakes'
+    | '/practice'
+    | '/practice-setup'
+    | '/summary'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ExamRoute: typeof ExamRoute
   FavoritesRoute: typeof FavoritesRoute
+  ImportRoute: typeof ImportRoute
   MistakesRoute: typeof MistakesRoute
   PracticeRoute: typeof PracticeRoute
+  PracticeSetupRoute: typeof PracticeSetupRoute
   SummaryRoute: typeof SummaryRoute
 }
 
@@ -88,11 +143,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/exam': {
+      id: '/exam'
+      path: '/exam'
+      fullPath: '/exam'
+      preLoaderRoute: typeof ExamRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/favorites': {
       id: '/favorites'
       path: '/favorites'
       fullPath: '/favorites'
       preLoaderRoute: typeof FavoritesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/import': {
+      id: '/import'
+      path: '/import'
+      fullPath: '/import'
+      preLoaderRoute: typeof ImportRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/mistakes': {
@@ -109,6 +178,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof PracticeRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/practice-setup': {
+      id: '/practice-setup'
+      path: '/practice-setup'
+      fullPath: '/practice-setup'
+      preLoaderRoute: typeof PracticeSetupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/summary': {
       id: '/summary'
       path: '/summary'
@@ -121,9 +197,12 @@ declare module '@tanstack/react-router' {
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ExamRoute: ExamRoute,
   FavoritesRoute: FavoritesRoute,
+  ImportRoute: ImportRoute,
   MistakesRoute: MistakesRoute,
   PracticeRoute: PracticeRoute,
+  PracticeSetupRoute: PracticeSetupRoute,
   SummaryRoute: SummaryRoute,
 }
 export const routeTree = rootRouteImport

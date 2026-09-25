@@ -32,6 +32,7 @@ pub fn run() {
             wordbooks::record_mistake_once,
             wordbooks::list_mistakes,
             wordbooks::sample_mistakes,
+            wordbooks::sample_exam,
             wordbooks::review_target,
             wordbooks::set_review_target,
             wordbooks::schedule_practice,

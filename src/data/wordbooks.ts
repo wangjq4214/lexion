@@ -8,6 +8,16 @@ export type ScheduledQuestion = {
   entry: WordEntry;
   direction: "zh-to-en" | "en-to-zh";
 };
+export type ExamRequest = {
+  source: "wordbook" | "favorites" | "mistakes";
+  wordbookId: number | null;
+  enToZhCount: number;
+  zhToEnCount: number;
+};
+export type ExamQuestion = {
+  entry: WordEntry;
+  direction: "zh-to-en" | "en-to-zh";
+};
 
 export type ScheduleRequest = {
   source: "wordbook" | "favorites" | "mistakes";
@@ -60,6 +70,7 @@ export type WordbookService = {
   reviewTarget(): Promise<number>;
   setReviewTarget(target: number): Promise<void>;
   schedulePractice(request: ScheduleRequest): Promise<ScheduledQuestion[]>;
+  sampleExam(request: ExamRequest): Promise<ExamQuestion[]>;
   completeReview(outcome: ReviewOutcome): Promise<void>;
   listWordbooks(): Promise<WordbookSummary[]>;
   importWordbook(request: ImportWordbookRequest): Promise<ImportWordbookResult>;
@@ -106,6 +117,11 @@ export const tauriWordbookService: WordbookService = {
   },
   setReviewTarget(target) {
     return invoke<void>("set_review_target", { target }).catch((error) => {
+      throw commandError(error);
+    });
+  },
+  sampleExam(request) {
+    return invoke<ExamQuestion[]>("sample_exam", request).catch((error) => {
       throw commandError(error);
     });
   },

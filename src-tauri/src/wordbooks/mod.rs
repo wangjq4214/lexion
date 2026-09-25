@@ -5,7 +5,9 @@ mod repository;
 use serde::Serialize;
 use tauri::State;
 
-pub use model::{ImportResult, MistakeEntry, ScheduledQuestion, WordEntry, WordbookSummary};
+pub use model::{
+    ExamQuestion, ImportResult, MistakeEntry, ScheduledQuestion, WordEntry, WordbookSummary,
+};
 pub use repository::WordbookRepository;
 
 #[derive(Debug, Serialize)]
@@ -182,6 +184,19 @@ pub fn set_review_target(
 ) -> Result<(), CommandError> {
     repository
         .set_review_target(target)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
+pub fn sample_exam(
+    source: String,
+    wordbook_id: Option<i64>,
+    en_to_zh_count: u32,
+    zh_to_en_count: u32,
+    repository: State<'_, WordbookRepository>,
+) -> Result<Vec<ExamQuestion>, CommandError> {
+    repository
+        .sample_exam(&source, wordbook_id, en_to_zh_count, zh_to_en_count)
         .map_err(map_repository_error)
 }
 
