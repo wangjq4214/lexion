@@ -7,7 +7,6 @@ import { type ReactNode, useEffect, useState } from "react";
 import type { WordbookService, WordbookSummary } from "../data/wordbooks";
 import { PracticeSetup } from "../features/practice/PracticeSetup";
 import { usePracticeStart } from "../features/practice/usePracticeStart";
-import { useRefreshWordbooks } from "../features/wordbooks/WordbookProvider";
 import {
   activeWordbookAtom,
   countSelectionAtom,
@@ -29,7 +28,6 @@ function PracticeSetupPage() {
   const [practiceSource, setPracticeSource] = useAtom(practiceSourceAtom);
   const [countSelection, setCountSelection] = useAtom(countSelectionAtom);
   const [customCount, setCustomCount] = useAtom(customCountAtom);
-  const refreshWordbooks = useRefreshWordbooks();
   const [checkAttempt, setCheckAttempt] = useState(0);
   const [collectionCheck, setCollectionCheck] = useState<{
     wordbooks: WordbookSummary[];
@@ -117,7 +115,7 @@ function PracticeSetupPage() {
             <Text role="status">正在检查收藏夹和错题本…</Text>
           ) : null}
           <Text color="secondary">
-            暂无可练习的单词，请返回首页导入单词本。
+            暂无可练习的单词，请返回首页进入单词本管理导入。
           </Text>
         </Stack>
       );
@@ -127,7 +125,6 @@ function PracticeSetupPage() {
     <PracticeSetup
       mode={state.mode}
       wordbooks={wordbooks}
-      wordbookService={service}
       activeWordbookId={activeWordbookId}
       onSelectWordbook={setActiveWordbookId}
       practiceSource={practiceSource}
@@ -136,7 +133,6 @@ function PracticeSetupPage() {
         setPracticeError(null);
       }}
       onBack={() => void navigate({ to: "/" })}
-      onDeleted={() => refreshWordbooks()}
       onSelectMode={(mode) => dispatch({ type: "select-mode", mode })}
       countSelection={countSelection}
       onCountSelectionChange={setCountSelection}

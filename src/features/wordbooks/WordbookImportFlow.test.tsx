@@ -13,6 +13,7 @@ function service(overrides?: Partial<WordbookService>): WordbookService {
     completeReview: vi.fn(async () => {}),
     pickWorkbookFile: vi.fn(async () => "C:\\imports\\lesson.xls"),
     listWordbooks: vi.fn(async () => []),
+    listWordbookEntries: vi.fn(async () => []),
     importWordbook: vi.fn(async (request) => ({
       wordbook: { id: 1, name: request.name, entryCount: 3 },
     })),

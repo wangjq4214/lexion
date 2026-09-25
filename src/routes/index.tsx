@@ -56,10 +56,10 @@ function HomePage() {
             onClick={() => void navigate({ to: "/favorites" })}
           />
           <Button
-            label="导入单词本"
+            label="单词本管理"
             variant="ghost"
             size="sm"
-            onClick={() => void navigate({ to: "/import" })}
+            onClick={() => void navigate({ to: "/wordbooks" })}
           />
         </Stack>
       </Section>

@@ -42,7 +42,7 @@
   - belongs to favorites-collection
 
 ### practice-source
-- **Definition:** The selected source for drawing a practice round: the active wordbook, the single favorites collection, or the mistake collection. With no wordbook present, a populated favorites or mistake collection remains available for browsing and practice. The entry screen offers navigation to practice, exam, mistakes, favorites, and wordbook import; practice setup contains source and mode settings but not collection browsing or import actions. When all sources are empty, learners return home to import a wordbook, and the wordbook source remains unavailable until a wordbook is imported.
+- **Definition:** The selected source for drawing a practice round: the active wordbook, the single favorites collection, or the mistake collection. With no wordbook present, a populated favorites or mistake collection remains available for browsing and practice. The entry screen offers navigation to practice, exam, mistakes, favorites, and wordbook management; practice setup contains source and mode settings but not collection browsing or wordbook management actions. When all sources are empty, learners return home to access wordbook management for import, and the wordbook source remains unavailable until a wordbook is imported.
 - **Relationships:**
   - references active-wordbook
   - references favorites-collection

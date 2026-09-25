@@ -52,6 +52,9 @@ function createService(options?: {
     reviewTarget: vi.fn(async () => 0.9),
     setReviewTarget: vi.fn(async () => {}),
     listWordbooks: vi.fn(async () => wordbooks),
+    listWordbookEntries: vi.fn(async (wordbookId: number) => [
+      ...(samples[wordbookId] ?? []),
+    ]),
     importWordbook: vi.fn(async (request: ImportWordbookRequest) => {
       const imported = { id: 99, name: request.name, entryCount: 2 };
       wordbooks = [...wordbooks, imported];
@@ -186,7 +189,7 @@ describe("App wordbook practice", () => {
       screen.queryByRole("button", { name: "导入单词本" }),
     ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回首页" }));
-    await user.click(await screen.findByRole("button", { name: "导入单词本" }));
+    await user.click(await screen.findByRole("button", { name: "单词本管理" }));
     await user.click(screen.getByRole("button", { name: "导入单词本" }));
     expect(await screen.findByLabelText("单词本名称")).toHaveValue("starter");
     await user.click(screen.getByRole("button", { name: "导入" }));
@@ -205,7 +208,12 @@ describe("App wordbook practice", () => {
       screen.getByRole("heading", { name: "设置练习方式" }),
     ).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: "返回首页" })).toHaveLength(1);
-    for (const name of ["查看收藏夹", "查看错题本", "导入单词本"])
+    for (const name of [
+      "查看收藏夹",
+      "查看错题本",
+      "导入单词本",
+      "删除当前单词本",
+    ])
       expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     expect(screen.getByLabelText("练习模式")).toHaveTextContent("看中文拼英文");
   });
@@ -219,41 +227,51 @@ describe("App wordbook practice", () => {
       ],
     });
     render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "返回首页" }));
+    await user.click(await screen.findByRole("button", { name: "单词本管理" }));
     await user.click(
-      await screen.findByRole("button", { name: "删除当前单词本" }),
+      await screen.findByRole("button", { name: "删除单词本 基础" }),
     );
     expect(screen.getByRole("alertdialog")).toHaveTextContent("基础");
     expect(service.deleteWordbook).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "取消" }));
     expect(service.deleteWordbook).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "删除当前单词本" }));
+    await user.click(screen.getByRole("button", { name: "删除单词本 基础" }));
     await user.click(screen.getByRole("button", { name: "删除单词本" }));
     await waitFor(() => expect(service.deleteWordbook).toHaveBeenCalledWith(1));
-    await waitFor(() =>
-      expect(screen.getByLabelText("当前单词本")).toHaveTextContent("进阶"),
-    );
+    expect(
+      await screen.findByRole("button", { name: "浏览 进阶" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "进阶中的单词" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "浏览 基础" }),
+    ).not.toBeInTheDocument();
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   });
 
-  it("returns home to import after deleting the last wordbook", async () => {
+  it("keeps management import available after deleting the last wordbook", async () => {
     const user = userEvent.setup();
     const service = createService({
       wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
     });
     render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "返回首页" }));
+    await user.click(await screen.findByRole("button", { name: "单词本管理" }));
     await user.click(
-      await screen.findByRole("button", { name: "删除当前单词本" }),
+      await screen.findByRole("button", { name: "删除单词本 基础" }),
     );
     await user.click(screen.getByRole("button", { name: "删除单词本" }));
     expect(
-      await screen.findByRole("button", { name: "返回首页" }),
+      await screen.findByText("还没有单词本，请导入 Excel 文件。"),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("heading", { name: "练习设置" }),
-    ).not.toBeInTheDocument();
+      screen.getByRole("button", { name: "导入单词本" }),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回首页" }));
     expect(
-      await screen.findByRole("button", { name: "导入单词本" }),
+      await screen.findByRole("button", { name: "单词本管理" }),
     ).toBeInTheDocument();
   });
 
@@ -264,20 +282,24 @@ describe("App wordbook practice", () => {
       favorites: [{ id: 7, english: "apple", chinese: "苹果" }],
     });
     render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "返回首页" }));
+    await user.click(await screen.findByRole("button", { name: "单词本管理" }));
     await user.click(
-      await screen.findByRole("button", { name: "删除当前单词本" }),
+      await screen.findByRole("button", { name: "删除单词本 基础" }),
     );
     await user.click(screen.getByRole("button", { name: "删除单词本" }));
     expect(
-      await screen.findByRole("heading", { name: "练习设置" }),
+      await screen.findByText("还没有单词本，请导入 Excel 文件。"),
     ).toBeInTheDocument();
-    expect(screen.queryByLabelText("当前单词本")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始练习" })).toBeDisabled();
     await user.click(screen.getByRole("button", { name: "返回首页" }));
     await user.click(await screen.findByRole("button", { name: "收藏夹" }));
     expect(await screen.findByText("苹果")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回首页" }));
     await user.click(await screen.findByRole("button", { name: "练习" }));
+    expect(
+      await screen.findByRole("heading", { name: "练习设置" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("当前单词本")).not.toBeInTheDocument();
     await user.click(await screen.findByLabelText("练习来源"));
     await user.click(await screen.findByRole("option", { name: "收藏夹" }));
     await user.click(screen.getByRole("button", { name: "开始练习" }));
@@ -350,7 +372,7 @@ describe("App wordbook practice", () => {
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回首页" }));
     expect(
-      await screen.findByRole("button", { name: "导入单词本" }),
+      await screen.findByRole("button", { name: "单词本管理" }),
     ).toBeInTheDocument();
   });
 
@@ -434,24 +456,25 @@ describe("App wordbook practice", () => {
       new Error("删除失败"),
     );
     render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "返回首页" }));
+    await user.click(await screen.findByRole("button", { name: "单词本管理" }));
     await user.click(
-      await screen.findByRole("button", { name: "删除当前单词本" }),
+      await screen.findByRole("button", { name: "删除单词本 基础" }),
     );
     await user.click(screen.getByRole("button", { name: "删除单词本" }));
     await waitFor(() =>
       expect(screen.getByRole("alertdialog")).toHaveTextContent("删除失败"),
     );
-    expect(screen.getByLabelText("当前单词本")).toHaveTextContent("基础");
+    expect(
+      screen.getByRole("heading", { name: "基础中的单词" }),
+    ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "删除单词本" }));
     await waitFor(() =>
       expect(service.deleteWordbook).toHaveBeenCalledTimes(2),
     );
     expect(
-      await screen.findByRole("button", { name: "返回首页" }),
+      await screen.findByText("还没有单词本，请导入 Excel 文件。"),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("heading", { name: "练习设置" }),
-    ).not.toBeInTheDocument();
   });
 
   it("does not treat an already missing wordbook as a successful deletion", async () => {
@@ -459,18 +482,27 @@ describe("App wordbook practice", () => {
     const service = createService({
       wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
     });
-    vi.mocked(service.deleteWordbook).mockResolvedValueOnce(false);
+    vi.mocked(service.deleteWordbook).mockImplementationOnce(async () => {
+      vi.mocked(service.listWordbooks).mockResolvedValue([]);
+      return false;
+    });
     render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "返回首页" }));
+    await user.click(await screen.findByRole("button", { name: "单词本管理" }));
     await user.click(
-      await screen.findByRole("button", { name: "删除当前单词本" }),
+      await screen.findByRole("button", { name: "删除单词本 基础" }),
     );
     await user.click(screen.getByRole("button", { name: "删除单词本" }));
-    await waitFor(() =>
-      expect(screen.getByRole("alertdialog")).toHaveTextContent(
-        "单词本已不存在",
-      ),
-    );
-    expect(screen.getByLabelText("当前单词本")).toHaveTextContent("基础");
+    expect(
+      await screen.findByText("单词本已不存在，请刷新后重试。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("还没有单词本，请导入 Excel 文件。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "基础中的单词" }),
+    ).not.toBeInTheDocument();
   });
 
   it("does not submit twice while deletion is pending", async () => {
@@ -486,8 +518,10 @@ describe("App wordbook practice", () => {
         }),
     );
     render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "返回首页" }));
+    await user.click(await screen.findByRole("button", { name: "单词本管理" }));
     await user.click(
-      await screen.findByRole("button", { name: "删除当前单词本" }),
+      await screen.findByRole("button", { name: "删除单词本 基础" }),
     );
     await user.click(screen.getByRole("button", { name: "删除单词本" }));
     expect(screen.getByRole("button", { name: "删除单词本" })).toBeDisabled();
@@ -2025,7 +2059,7 @@ describe("file routes and round navigation", () => {
       await screen.findByRole("button", { name: "练习" }),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "考试" })).toBeInTheDocument();
-    for (const label of ["错题本", "收藏夹", "导入单词本"])
+    for (const label of ["错题本", "收藏夹", "单词本管理"])
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: "练习设置" }),
@@ -2076,7 +2110,7 @@ describe("file routes and round navigation", () => {
     expect(screen.getByRole("button", { name: "错题本" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "收藏夹" })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "导入单词本" }),
+      screen.getByRole("button", { name: "单词本管理" }),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "练习" }));
     expect(
@@ -2087,15 +2121,15 @@ describe("file routes and round navigation", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps import on its own route and refreshes the new wordbook", async () => {
+  it("imports through management and refreshes the new wordbook", async () => {
     const user = userEvent.setup();
     const instance = createService({ selectedPath: "C:\\books\\starter.xlsx" });
     const history = createMemoryHistory({ initialEntries: ["/"] });
     renderView(<App history={history} wordbookService={instance} />);
-    await user.click(await screen.findByRole("button", { name: "导入单词本" }));
-    expect(history.location.pathname).toBe("/import");
+    await user.click(await screen.findByRole("button", { name: "单词本管理" }));
+    expect(history.location.pathname).toBe("/wordbooks");
     expect(
-      screen.getByRole("heading", { name: "导入单词本" }),
+      screen.getByRole("heading", { name: "单词本管理" }),
     ).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "导入单词本" }));
     expect(await screen.findByLabelText("单词本名称")).toHaveValue("starter");
@@ -2110,6 +2144,190 @@ describe("file routes and round navigation", () => {
     expect(await screen.findByLabelText("当前单词本")).toHaveTextContent(
       "starter",
     );
+  });
+
+  it("redirects legacy import links into wordbook management", async () => {
+    const history = createMemoryHistory({ initialEntries: ["/import"] });
+    renderView(<App history={history} wordbookService={service()} />);
+    expect(
+      await screen.findByRole("heading", { name: "单词本管理" }),
+    ).toBeInTheDocument();
+    await waitFor(() => expect(history.location.pathname).toBe("/wordbooks"));
+  });
+
+  it("browses every entry, switches books, and deletes only the confirmed entry", async () => {
+    const user = userEvent.setup();
+    const instance = createService({
+      wordbooks: [
+        { id: 1, name: "基础", entryCount: 3 },
+        { id: 2, name: "进阶", entryCount: 1 },
+      ],
+      samples: {
+        1: [
+          { id: 1, english: "apple", chinese: "苹果" },
+          { id: 2, english: "book", chinese: "书" },
+          { id: 3, english: "cat", chinese: "猫" },
+        ],
+        2: [{ id: 4, english: "dog", chinese: "狗" }],
+      },
+      favorites: [{ id: 7, english: "apple", chinese: "苹果" }],
+      mistakes: [{ id: 8, english: "apple", chinese: "苹果", errorCount: 2 }],
+    });
+    renderView(
+      <App
+        history={createMemoryHistory({ initialEntries: ["/wordbooks"] })}
+        wordbookService={instance}
+      />,
+    );
+    expect(
+      await screen.findByRole("button", { name: "删除 cat：猫" }),
+    ).toBeInTheDocument();
+    expect(instance.listWordbookEntries).toHaveBeenCalledWith(1);
+    expect(instance.sampleWordbook).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "浏览 进阶" }));
+    expect(
+      await screen.findByRole("button", { name: "删除 dog：狗" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "删除 apple：苹果" }),
+    ).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "浏览 基础" }));
+    await user.click(
+      await screen.findByRole("button", { name: "删除 apple：苹果" }),
+    );
+    expect(screen.getByRole("alertdialog")).toHaveTextContent("apple：苹果");
+    expect(instance.deleteWordbookEntry).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "取消" }));
+    expect(instance.deleteWordbookEntry).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "删除 apple：苹果" }));
+    await user.click(screen.getByRole("button", { name: "删除单词" }));
+    await waitFor(() =>
+      expect(instance.deleteWordbookEntry).toHaveBeenCalledWith(1, 1),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", { name: "删除 apple：苹果" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("button", { name: "删除 book：书" }),
+    ).toBeInTheDocument();
+    expect(instance.deleteWordbook).not.toHaveBeenCalled();
+    expect(await instance.listFavorites()).toEqual([
+      { id: 7, english: "apple", chinese: "苹果" },
+    ]);
+    expect(await instance.listMistakes()).toEqual([
+      { id: 8, english: "apple", chinese: "苹果", errorCount: 2 },
+    ]);
+  });
+
+  it("reconciles a missing entry after deletion fails", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+    });
+    vi.mocked(service.deleteWordbookEntry).mockImplementationOnce(async () => {
+      vi.mocked(service.listWordbookEntries).mockResolvedValue([]);
+      vi.mocked(service.listWordbooks).mockResolvedValue([
+        { id: 1, name: "基础", entryCount: 0 },
+      ]);
+      return false;
+    });
+    renderView(
+      <App
+        history={createMemoryHistory({ initialEntries: ["/wordbooks"] })}
+        wordbookService={service}
+      />,
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "删除 apple：苹果" }),
+    );
+    await user.click(screen.getByRole("button", { name: "删除单词" }));
+    expect(
+      await screen.findByText("该单词已不在当前单词本中，请刷新后重试。"),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByText("这个单词本还没有单词。"),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(service.listWordbooks).toHaveBeenCalledTimes(2);
+  });
+
+  it("refreshes the replaced wordbook and browses its new entries", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [{ id: 1, english: "old", chinese: "旧" }] },
+      selectedPath: "C:\\books\\基础.xlsx",
+    });
+    vi.mocked(service.importWordbook).mockImplementationOnce(async () => {
+      vi.mocked(service.listWordbooks).mockResolvedValue([
+        { id: 2, name: "基础", entryCount: 1 },
+      ]);
+      vi.mocked(service.listWordbookEntries).mockImplementation(async (id) =>
+        id === 2 ? [{ id: 3, english: "new", chinese: "新" }] : [],
+      );
+      return { wordbook: { id: 2, name: "基础", entryCount: 1 } };
+    });
+    renderView(
+      <App
+        history={createMemoryHistory({ initialEntries: ["/wordbooks"] })}
+        wordbookService={service}
+      />,
+    );
+    expect(
+      await screen.findByRole("button", { name: "删除 old：旧" }),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "导入单词本" }));
+    await user.click(await screen.findByRole("button", { name: "导入" }));
+    expect(
+      await screen.findByRole("button", { name: "删除 new：新" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "删除 old：旧" }),
+    ).not.toBeInTheDocument();
+    expect(service.listWordbookEntries).toHaveBeenCalledWith(2);
+  });
+
+  it("discards a previous book's late entry load after switching", async () => {
+    const user = userEvent.setup();
+    const instance = createService({
+      wordbooks: [
+        { id: 1, name: "基础", entryCount: 1 },
+        { id: 2, name: "进阶", entryCount: 1 },
+      ],
+    });
+    let resolveFirst!: (entries: WordEntry[]) => void;
+    vi.mocked(instance.listWordbookEntries).mockImplementation((id) =>
+      id === 1
+        ? new Promise((resolve) => {
+            resolveFirst = resolve;
+          })
+        : Promise.resolve([{ id: 2, english: "dog", chinese: "狗" }]),
+    );
+    renderView(
+      <App
+        history={createMemoryHistory({ initialEntries: ["/wordbooks"] })}
+        wordbookService={instance}
+      />,
+    );
+    await waitFor(() =>
+      expect(instance.listWordbookEntries).toHaveBeenCalledWith(1),
+    );
+    await user.click(screen.getByRole("button", { name: "浏览 进阶" }));
+    expect(
+      await screen.findByRole("button", { name: "删除 dog：狗" }),
+    ).toBeInTheDocument();
+    await act(async () =>
+      resolveFirst([{ id: 1, english: "apple", chinese: "苹果" }]),
+    );
+    expect(
+      screen.getByRole("button", { name: "删除 dog：狗" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "删除 apple：苹果" }),
+    ).not.toBeInTheDocument();
   });
 
   it.each(["/practice", "/summary"])(

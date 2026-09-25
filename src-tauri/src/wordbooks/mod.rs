@@ -19,6 +19,16 @@ pub enum CommandError {
 }
 
 #[tauri::command]
+pub fn list_wordbook_entries(
+    wordbook_id: i64,
+    repository: State<'_, WordbookRepository>,
+) -> Result<Vec<WordEntry>, CommandError> {
+    repository
+        .list_wordbook_entries(wordbook_id)
+        .map_err(map_repository_error)
+}
+
+#[tauri::command]
 pub fn list_wordbooks(
     repository: State<'_, WordbookRepository>,
 ) -> Result<Vec<WordbookSummary>, CommandError> {

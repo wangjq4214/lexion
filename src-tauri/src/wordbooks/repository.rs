@@ -169,6 +169,29 @@ impl WordbookRepository {
         rows.collect()
     }
 
+    pub fn list_wordbook_entries(
+        &self,
+        wordbook_id: i64,
+    ) -> Result<Vec<WordEntry>, RepositoryError> {
+        if wordbook_id <= 0 {
+            return Err(RepositoryError::Validation("单词本 ID 必须大于零"));
+        }
+        let connection = self.connect()?;
+        let exists: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM wordbooks WHERE id = ?1)",
+            [wordbook_id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(RepositoryError::Validation("单词本不存在"));
+        }
+        let mut statement = connection.prepare(
+            "SELECT id, english, chinese FROM entries WHERE wordbook_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([wordbook_id], word_entry)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     pub fn replace(
         &self,
         name: &str,
@@ -769,6 +792,47 @@ mod tests {
             sample.len()
         );
         assert_eq!(reopened.sample(listed[1].id, 50).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn listing_wordbook_entries_returns_all_in_id_order_and_only_selected_book() {
+        let directory = tempdir().unwrap();
+        let repository = WordbookRepository::open(directory.path().join("words.sqlite")).unwrap();
+        let first = repository
+            .replace("first", &entries("first", 300), false)
+            .unwrap();
+        let second = repository
+            .replace("second", &entries("second", 2), false)
+            .unwrap();
+        let empty = repository.replace("empty", &[], false).unwrap();
+
+        let listed = repository.list_wordbook_entries(first.id).unwrap();
+        assert_eq!(listed.len(), 300);
+        for (index, entry) in listed.iter().enumerate() {
+            assert!(entry.id > 0);
+            assert_eq!(entry.english, format!("first-{index}"));
+            assert_eq!(entry.chinese, format!("释义-{index}"));
+        }
+        assert!(listed.windows(2).all(|pair| pair[0].id < pair[1].id));
+        assert_eq!(
+            repository
+                .list_wordbook_entries(second.id)
+                .unwrap()
+                .iter()
+                .map(|entry| entry.english.as_str())
+                .collect::<Vec<_>>(),
+            vec!["second-0", "second-1"]
+        );
+        assert!(repository
+            .list_wordbook_entries(empty.id)
+            .unwrap()
+            .is_empty());
+        for id in [0, -1, i64::MAX] {
+            assert!(matches!(
+                repository.list_wordbook_entries(id),
+                Err(RepositoryError::Validation(_))
+            ));
+        }
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             wordbooks::list_wordbooks,
+            wordbooks::list_wordbook_entries,
             wordbooks::import_wordbook,
             wordbooks::sample_wordbook,
             wordbooks::delete_wordbook,

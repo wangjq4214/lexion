@@ -17,6 +17,7 @@ import { Route as MistakesRouteImport } from './routes/mistakes'
 import { Route as PracticeRouteImport } from './routes/practice'
 import { Route as PracticeSetupRouteImport } from './routes/practice-setup'
 import { Route as SummaryRouteImport } from './routes/summary'
+import { Route as WordbooksRouteImport } from './routes/wordbooks'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -58,6 +59,11 @@ const SummaryRoute = SummaryRouteImport.update({
   path: '/summary',
   getParentRoute: () => rootRouteImport,
 } as any)
+const WordbooksRoute = WordbooksRouteImport.update({
+  id: '/wordbooks',
+  path: '/wordbooks',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -68,6 +74,7 @@ export interface FileRoutesByFullPath {
   '/practice': typeof PracticeRoute
   '/practice-setup': typeof PracticeSetupRoute
   '/summary': typeof SummaryRoute
+  '/wordbooks': typeof WordbooksRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -78,6 +85,7 @@ export interface FileRoutesByTo {
   '/practice': typeof PracticeRoute
   '/practice-setup': typeof PracticeSetupRoute
   '/summary': typeof SummaryRoute
+  '/wordbooks': typeof WordbooksRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -89,6 +97,7 @@ export interface FileRoutesById {
   '/practice': typeof PracticeRoute
   '/practice-setup': typeof PracticeSetupRoute
   '/summary': typeof SummaryRoute
+  '/wordbooks': typeof WordbooksRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -101,6 +110,7 @@ export interface FileRouteTypes {
     | '/practice'
     | '/practice-setup'
     | '/summary'
+    | '/wordbooks'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -111,6 +121,7 @@ export interface FileRouteTypes {
     | '/practice'
     | '/practice-setup'
     | '/summary'
+    | '/wordbooks'
   id:
     | '__root__'
     | '/'
@@ -121,6 +132,7 @@ export interface FileRouteTypes {
     | '/practice'
     | '/practice-setup'
     | '/summary'
+    | '/wordbooks'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -132,6 +144,7 @@ export interface RootRouteChildren {
   PracticeRoute: typeof PracticeRoute
   PracticeSetupRoute: typeof PracticeSetupRoute
   SummaryRoute: typeof SummaryRoute
+  WordbooksRoute: typeof WordbooksRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -192,6 +205,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SummaryRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/wordbooks': {
+      id: '/wordbooks'
+      path: '/wordbooks'
+      fullPath: '/wordbooks'
+      preLoaderRoute: typeof WordbooksRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -204,6 +224,7 @@ const rootRouteChildren: RootRouteChildren = {
   PracticeRoute: PracticeRoute,
   PracticeSetupRoute: PracticeSetupRoute,
   SummaryRoute: SummaryRoute,
+  WordbooksRoute: WordbooksRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

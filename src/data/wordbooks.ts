@@ -73,6 +73,7 @@ export type WordbookService = {
   sampleExam(request: ExamRequest): Promise<ExamQuestion[]>;
   completeReview(outcome: ReviewOutcome): Promise<void>;
   listWordbooks(): Promise<WordbookSummary[]>;
+  listWordbookEntries(id: number): Promise<WordEntry[]>;
   importWordbook(request: ImportWordbookRequest): Promise<ImportWordbookResult>;
   sampleWordbook(wordbookId: number, limit: number): Promise<WordEntry[]>;
   deleteWordbook(wordbookId: number): Promise<boolean>;
@@ -148,6 +149,13 @@ export const tauriWordbookService: WordbookService = {
 
   listWordbooks() {
     return invoke<WordbookSummary[]>("list_wordbooks").catch((error) => {
+      throw commandError(error);
+    });
+  },
+  listWordbookEntries(id) {
+    return invoke<WordEntry[]>("list_wordbook_entries", {
+      wordbookId: id,
+    }).catch((error) => {
       throw commandError(error);
     });
   },

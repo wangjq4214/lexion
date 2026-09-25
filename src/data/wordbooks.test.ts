@@ -7,6 +7,34 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 beforeEach(() => {
   vi.mocked(invoke).mockReset();
 });
+describe("full wordbook entry browsing service contract", () => {
+  it("forwards the book ID, preserves entry identity and maps validation failures", async () => {
+    const entries = [
+      { id: 11, english: "Apple", chinese: "苹果" },
+      { id: 12, english: "Pear", chinese: "梨" },
+    ];
+    vi.mocked(invoke).mockResolvedValueOnce(entries).mockRejectedValueOnce({
+      kind: "validation",
+      message: "单词本不存在",
+    });
+    await expect(tauriWordbookService.listWordbookEntries(3)).resolves.toEqual(
+      entries,
+    );
+    expect(invoke).toHaveBeenNthCalledWith(1, "list_wordbook_entries", {
+      wordbookId: 3,
+    });
+    await expect(
+      tauriWordbookService.listWordbookEntries(999),
+    ).rejects.toMatchObject({
+      kind: "validation",
+      message: "单词本不存在",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "list_wordbook_entries", {
+      wordbookId: 999,
+    });
+  });
+});
+
 describe("wordbook deletion service contract", () => {
   it("deletes by ID and maps database errors", async () => {
     vi.mocked(invoke).mockResolvedValueOnce(true).mockRejectedValueOnce({
