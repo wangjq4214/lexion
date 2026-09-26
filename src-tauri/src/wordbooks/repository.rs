@@ -4,6 +4,7 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::model::{ExamQuestion, ImportedEntry, MistakeEntry, WordEntry, WordbookSummary};
 
+pub(crate) mod replay;
 #[path = "schedule.rs"]
 mod schedule;
 
@@ -41,8 +42,11 @@ impl WordbookRepository {
     }
 
     fn initialize(&self) -> Result<(), rusqlite::Error> {
-        let connection = self.connect()?;
-        connection.execute_batch(
+        let mut connection = self.connect()?;
+        let transaction = connection.transaction()?;
+        // Check before adding default settings: a legacy database has no reconstructible history.
+        let legacy = replay::has_legacy_data(&transaction)?;
+        transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS wordbooks (
                 id INTEGER PRIMARY KEY,
                 name TEXT NOT NULL UNIQUE,
@@ -108,28 +112,27 @@ impl WordbookRepository {
             );
             INSERT OR IGNORE INTO review_settings(id, target_retention) VALUES (1, 0.9);",
         )?;
-        let has_mistake_created_at: bool = connection.query_row(
+        let has_mistake_created_at: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('mistake_submissions') WHERE name = 'created_at')",
             [],
             |row| row.get(0),
         )?;
         if !has_mistake_created_at {
-            connection.execute_batch(
+            transaction.execute_batch(
                 "ALTER TABLE mistake_submissions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;",
             )?;
         }
-        connection.execute_batch(
+        transaction.execute_batch(
             "CREATE INDEX IF NOT EXISTS mistake_submissions_created_at ON mistake_submissions(created_at);",
         )?;
-        let has_created_at: bool = connection.query_row(
+        let has_created_at: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('pending_reviews') WHERE name = 'created_at')",
             [],
             |row| row.get(0),
         )?;
         if !has_created_at {
-            connection.execute_batch(
-                "BEGIN;
-                 CREATE TABLE pending_reviews_new (
+            transaction.execute_batch(
+                "CREATE TABLE pending_reviews_new (
                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                    normalized_english TEXT NOT NULL,
                    chinese TEXT NOT NULL,
@@ -140,13 +143,14 @@ impl WordbookRepository {
                  INSERT INTO pending_reviews_new(id, normalized_english, chinese, direction, completed)
                    SELECT id, normalized_english, chinese, direction, completed FROM pending_reviews;
                  DROP TABLE pending_reviews;
-                 ALTER TABLE pending_reviews_new RENAME TO pending_reviews;
-                 COMMIT;",
+                 ALTER TABLE pending_reviews_new RENAME TO pending_reviews;",
             )?;
         }
-        connection.execute_batch(
+        transaction.execute_batch(
             "CREATE INDEX IF NOT EXISTS pending_reviews_created_at ON pending_reviews(created_at);",
         )?;
+        replay::initialize(&transaction, legacy)?;
+        transaction.commit()?;
         Ok(())
     }
 

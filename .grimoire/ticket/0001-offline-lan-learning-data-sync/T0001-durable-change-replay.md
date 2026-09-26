@@ -2,7 +2,7 @@
 
 **Ticket ID:** T0001
 **Source:** [Spec 0004](../../spec/0004-offline-lan-learning-data-sync.md) §Requirement 1、3、5；[ADR 0009](../../adr/0009-support-offline-multi-device-lan-sync.md)
-**Status:** Todo
+**Status:** Done
 
 ## Goal
 
