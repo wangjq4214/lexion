@@ -15,8 +15,12 @@ pub fn run() {
             let data_directory = app.path().app_data_dir()?;
             fs::create_dir_all(&data_directory)?;
             let repository = WordbookRepository::open(data_directory.join("wordbooks.sqlite"))?;
+            app.manage(lan::LanBackend::open(
+                &data_directory,
+                repository.clone(),
+                app.handle().clone(),
+            ));
             app.manage(repository);
-            app.manage(lan::LanBackend::open(&data_directory));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

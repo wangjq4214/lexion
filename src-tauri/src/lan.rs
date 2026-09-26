@@ -1,4 +1,4 @@
-//! Discovery and first-pairing only. No learning data is accepted on this protocol.
+//! Authenticated discovery, pairing and bounded direct-peer learning exchange.
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
@@ -7,20 +7,26 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::wordbooks::repository::replay::{DeviceId, Envelope};
+use crate::wordbooks::WordbookRepository;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use snow::{Builder, TransportState};
-use tauri::State;
+use tauri::{Emitter, State};
 
 const SERVICE: &str = "_lexion-pair._tcp.local.";
 const NOISE: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 const TIMEOUT: Duration = Duration::from_secs(120);
 const IO_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_FRAME: usize = 4096;
+const MAX_SYNC_FRAME: usize = 60_000;
+const MAX_SYNC_MESSAGE: usize = 16 * 1024 * 1024;
+const MAX_SYNC_CHANGES: usize = 128;
+const MAX_SESSIONS: usize = 8;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -47,6 +53,14 @@ pub struct LanStatus {
     pub pending: Vec<PendingView>,
     pub trusted: Vec<TrustedView>,
     pub error: Option<String>,
+    pub sync: Vec<SyncView>,
+}
+#[derive(Clone, Serialize)]
+pub struct SyncView {
+    pub id: String,
+    pub state: String,
+    pub detail: Option<String>,
+    pub last_sync: Option<String>,
 }
 
 #[derive(Clone)]
@@ -68,12 +82,17 @@ struct Shared {
     error: Option<String>,
     authenticated: std::collections::HashSet<String>,
     reconnect_attempts: HashMap<String, Instant>,
+    sync: HashMap<String, SyncView>,
+    active_sessions: usize,
+    sync_ids: HashMap<String, String>,
 }
 pub struct LanService {
     local_id: String,
     key: [u8; 32],
     trust_path: PathBuf,
     state: Arc<Mutex<Shared>>,
+    repository: Option<WordbookRepository>,
+    app: Option<tauri::AppHandle>,
 }
 pub struct LanBackend {
     service: Option<Arc<LanService>>,
@@ -87,10 +106,16 @@ struct Identity {
 #[derive(Serialize, Deserialize)]
 struct TrustFile {
     peers: HashMap<String, String>,
+    #[serde(default)]
+    sync_ids: HashMap<String, String>,
 }
 
 fn identity_id(key: &[u8]) -> String {
     hex::encode(Sha256::digest(key))
+}
+/// Replay origin is verifiably tied to the authenticated Noise static public key.
+fn replay_origin(key: &[u8]) -> DeviceId {
+    DeviceId(identity_id(key)[..32].to_owned())
 }
 fn pairing_code(hash: &[u8]) -> String {
     let number = u64::from_be_bytes(hash[..8].try_into().expect("Noise hash")) % 100_000_000;
@@ -163,27 +188,59 @@ fn load_identity(dir: &Path) -> Result<[u8; 32]> {
         .try_into()
         .map_err(|_| "Invalid LAN identity key length".to_string())
 }
-fn load_trust(path: &Path) -> Result<HashMap<String, String>> {
+fn load_trust(path: &Path) -> Result<TrustFile> {
     if !path.exists() {
-        return Ok(HashMap::new());
+        return Ok(TrustFile {
+            peers: HashMap::new(),
+            sync_ids: HashMap::new(),
+        });
     }
-    let peers = serde_json::from_slice::<TrustFile>(&fs::read(path).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?
-        .peers;
+    let file = serde_json::from_slice::<TrustFile>(&fs::read(path).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let peers = &file.peers;
     if peers
         .keys()
         .any(|id| hex::decode(id).map_or(true, |key| key.len() != 32))
     {
         return Err("Invalid LAN trust identity".into());
     }
-    Ok(peers)
+    if file
+        .sync_ids
+        .values()
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        != file.sync_ids.len()
+        || file.sync_ids.iter().any(|(key, id)| {
+            !peers.keys().any(|trusted_key| {
+                hex::decode(trusted_key).is_ok_and(|bytes| identity_id(&bytes) == *key)
+            }) || id.len() != 32
+                || !id
+                    .bytes()
+                    .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        })
+    {
+        return Err("Invalid pinned replay identity".into());
+    }
+    Ok(file)
 }
 impl LanService {
     fn open(dir: &Path) -> Result<Arc<Self>> {
+        Self::open_with_repository(dir, None, None)
+    }
+    fn open_with_repository(
+        dir: &Path,
+        repository: Option<WordbookRepository>,
+        app: Option<tauri::AppHandle>,
+    ) -> Result<Arc<Self>> {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         let key = load_identity(dir)?;
         let trust_path = dir.join("lan-trust.json");
-        let trusted = load_trust(&trust_path)?;
+        let trust = load_trust(&trust_path)?;
+        if let Some(repo) = &repository {
+            let public = snow_public(&key)?;
+            repo.bind_replay_origin(&replay_origin(&public))
+                .map_err(|e| format!("LAN replay origin binding: {e:?}"))?;
+        }
         Ok(Arc::new(Self {
             local_id: identity_id(&snow_public(&key)?),
             key,
@@ -191,11 +248,16 @@ impl LanService {
             state: Arc::new(Mutex::new(Shared {
                 discovered: HashMap::new(),
                 pending: HashMap::new(),
-                trusted,
+                trusted: trust.peers,
                 error: None,
                 authenticated: Default::default(),
                 reconnect_attempts: HashMap::new(),
+                sync: HashMap::new(),
+                active_sessions: 0,
+                sync_ids: trust.sync_ids,
             })),
+            repository,
+            app,
         }))
     }
     fn status(&self) -> LanStatus {
@@ -234,11 +296,24 @@ impl LanService {
             })
             .collect();
         trusted.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut sync: Vec<_> = state.sync.values().cloned().collect();
+        // Sync state is keyed by the Noise key hash; trusted views use the raw key.
+        for view in &mut sync {
+            if let Some(key) = state
+                .trusted
+                .keys()
+                .find(|key| hex::decode(key).is_ok_and(|bytes| identity_id(&bytes) == view.id))
+            {
+                view.id = key.clone();
+            }
+        }
+        sync.sort_by(|a, b| a.id.cmp(&b.id));
         LanStatus {
             peers,
             pending,
             trusted,
             error: state.error.clone(),
+            sync,
         }
     }
     fn start(self: &Arc<Self>) -> Result<()> {
@@ -300,17 +375,7 @@ impl LanService {
                         );
                     }
                     Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
-                        let removed: Vec<_> = state
-                            .discovered
-                            .iter()
-                            .filter(|(_, p)| p.fullname == fullname)
-                            .map(|(id, _)| id.clone())
-                            .collect();
-                        for id in removed {
-                            state.discovered.remove(&id);
-                            state.authenticated.remove(&id);
-                            state.reconnect_attempts.remove(&id);
-                        }
+                        remove_discovered(&mut state, &fullname);
                     }
                     _ => {}
                 }
@@ -425,13 +490,31 @@ impl LanService {
             &self.trust_path,
             &serde_json::to_vec(&TrustFile {
                 peers: peers.clone(),
+                sync_ids: state.sync_ids.clone(),
             })
             .map_err(|e| e.to_string())?,
         )?;
         state.trusted = peers;
         Ok(())
     }
-    fn session(
+    fn session(&self, stream: TcpStream, initiator: bool, expected: Option<&str>) -> Result<()> {
+        {
+            let mut state = self.state.lock().unwrap();
+            if state.active_sessions >= MAX_SESSIONS {
+                return Err("Too many LAN sessions".into());
+            }
+            state.active_sessions += 1;
+        }
+        struct SessionGuard(Arc<Mutex<Shared>>);
+        impl Drop for SessionGuard {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().active_sessions -= 1;
+            }
+        }
+        let _guard = SessionGuard(self.state.clone());
+        self.session_inner(stream, initiator, expected)
+    }
+    fn session_inner(
         &self,
         mut stream: TcpStream,
         initiator: bool,
@@ -503,8 +586,12 @@ impl LanService {
         };
         let name: String = name.chars().take(80).collect();
         if already_trusted && remote_trusted {
-            self.state.lock().unwrap().authenticated.insert(peer_id);
-            return Ok(()); // Both sides remember the authenticated key; no data transport yet.
+            self.state
+                .lock()
+                .unwrap()
+                .authenticated
+                .insert(peer_id.clone());
+            return self.synchronize(&peer_id, &mut stream, &mut transport, initiator);
         }
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|e| e.to_string())?;
@@ -520,7 +607,249 @@ impl LanService {
         );
         let result = self.finish_pairing(&request_id, &remote, &mut stream, &mut transport);
         self.state.lock().unwrap().pending.remove(&request_id);
-        result.map_err(|e| format!("Pairing decision: {e}"))
+        result.map_err(|e| format!("Pairing decision: {e}"))?;
+        self.synchronize(&peer_id, &mut stream, &mut transport, initiator)
+    }
+    fn synchronize(
+        &self,
+        id: &str,
+        stream: &mut TcpStream,
+        transport: &mut TransportState,
+        initiator: bool,
+    ) -> Result<()> {
+        let Some(repo) = &self.repository else {
+            return Ok(());
+        };
+        let peer = DeviceId(id.to_owned());
+        self.set_sync(id, "syncing", None, false);
+        let result = self.exchange(repo, &peer, stream, transport, initiator);
+        match &result {
+            Ok(()) => self.set_sync(id, "synced", None, true),
+            Err(error) => {
+                let when = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map_or(0, |time| time.as_secs());
+                self.set_sync(id, "error", Some(format!("{when}: {error}")), false);
+            }
+        }
+        result
+    }
+    fn set_sync(&self, id: &str, status: &str, detail: Option<String>, success: bool) {
+        let mut state = self.state.lock().unwrap();
+        // Removal can race the final encrypted frame; completion must not mark an
+        // already-removed discovery as online. A new session resets it to syncing.
+        let removed_during_session = status != "syncing"
+            && state
+                .sync
+                .get(id)
+                .is_some_and(|view| view.state == "offline");
+        let previous = state.sync.get(id).and_then(|view| view.last_sync.clone());
+        let last_sync = if success {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .ok()
+                .map(|time| time.as_secs().to_string())
+        } else {
+            previous
+        };
+        state.sync.insert(
+            id.to_owned(),
+            SyncView {
+                id: id.to_owned(),
+                state: if removed_during_session {
+                    "offline"
+                } else {
+                    status
+                }
+                .to_owned(),
+                detail,
+                last_sync,
+            },
+        );
+    }
+    fn pinned_origin(
+        &self,
+        id: &str,
+        repo: &WordbookRepository,
+        stream: &mut TcpStream,
+        transport: &mut TransportState,
+        initiator: bool,
+    ) -> Result<DeviceId> {
+        let local = repo
+            .replay_device_id()
+            .map_err(|e| format!("Replay identity: {e:?}"))?;
+        let deadline = Instant::now() + Duration::from_secs(12);
+        let remote = if initiator {
+            send_sync(stream, transport, &SyncMessage::Identity(local.clone()))?;
+            match receive_sync(stream, transport, deadline)? {
+                SyncMessage::Identity(id) => id,
+                _ => return Err("Expected sync identity".into()),
+            }
+        } else {
+            let remote = match receive_sync(stream, transport, deadline)? {
+                SyncMessage::Identity(id) => id,
+                _ => return Err("Expected sync identity".into()),
+            };
+            send_sync(stream, transport, &SyncMessage::Identity(local.clone()))?;
+            remote
+        };
+        if remote == local
+            || remote.0.len() != 32
+            || !remote
+                .0
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err("Invalid replay identity".into());
+        }
+        let mut state = self.state.lock().unwrap();
+        let authenticated_key = state
+            .trusted
+            .keys()
+            .filter_map(|key| hex::decode(key).ok())
+            .find(|key| identity_id(key) == id)
+            .ok_or("Untrusted sync identity")?;
+        if remote != replay_origin(&authenticated_key) {
+            return Err("Replay origin is not bound to authenticated Noise key".into());
+        }
+        if state.sync_ids.get(id).is_some_and(|old| old != &remote.0)
+            || state
+                .sync_ids
+                .iter()
+                .any(|(key, old)| key != id && old == &remote.0)
+        {
+            return Err("Replay identity does not match paired device".into());
+        }
+        if !state.sync_ids.contains_key(id) {
+            let mut sync_ids = state.sync_ids.clone();
+            sync_ids.insert(id.to_owned(), remote.0.clone());
+            atomic_write(
+                &self.trust_path,
+                &serde_json::to_vec(&TrustFile {
+                    peers: state.trusted.clone(),
+                    sync_ids: sync_ids.clone(),
+                })
+                .map_err(|e| e.to_string())?,
+            )?;
+            state.sync_ids = sync_ids;
+        }
+        Ok(remote)
+    }
+    fn exchange(
+        &self,
+        repo: &WordbookRepository,
+        peer: &DeviceId,
+        stream: &mut TcpStream,
+        transport: &mut TransportState,
+        initiator: bool,
+    ) -> Result<()> {
+        let peer = self.pinned_origin(&peer.0, repo, stream, transport, initiator)?;
+        let cursor = repo
+            .exchange_cursors(&peer)
+            .map_err(|e| format!("Sync cursor: {e:?}"))?[&peer];
+        let deadline = Instant::now() + Duration::from_secs(120);
+        let remote_cursor = if initiator {
+            send_sync(
+                stream,
+                transport,
+                &SyncMessage::Start { version: 1, cursor },
+            )?;
+            match receive_sync(stream, transport, deadline)? {
+                SyncMessage::Start { version: 1, cursor } => cursor,
+                _ => return Err("Invalid sync introduction".into()),
+            }
+        } else {
+            let received = match receive_sync(stream, transport, deadline)? {
+                SyncMessage::Start { version: 1, cursor } => cursor,
+                _ => return Err("Invalid sync introduction".into()),
+            };
+            send_sync(
+                stream,
+                transport,
+                &SyncMessage::Start { version: 1, cursor },
+            )?;
+            received
+        };
+        let local = repo
+            .replay_device_id()
+            .map_err(|e| format!("Replay identity: {e:?}"))?;
+        let local_cursor = repo
+            .exchange_cursors(&peer)
+            .map_err(|e| format!("Sync cursor: {e:?}"))?[&local];
+        if remote_cursor > local_cursor {
+            return Err("Peer reported an impossible sync cursor".into());
+        }
+        if initiator {
+            self.send_changes(repo, &peer, remote_cursor, stream, transport)?;
+            self.receive_changes(repo, &peer, stream, transport, deadline)?;
+        } else {
+            self.receive_changes(repo, &peer, stream, transport, deadline)?;
+            self.send_changes(repo, &peer, remote_cursor, stream, transport)?;
+        }
+        Ok(())
+    }
+    fn send_changes(
+        &self,
+        repo: &WordbookRepository,
+        peer: &DeviceId,
+        mut cursor: u64,
+        stream: &mut TcpStream,
+        transport: &mut TransportState,
+    ) -> Result<()> {
+        for _ in 0..MAX_SYNC_CHANGES {
+            let mut batch = repo
+                .exchange_batch(peer, cursor, 1)
+                .map_err(|e| format!("Sync export: {e:?}"))?;
+            let Some(change) = batch.pop() else {
+                send_sync(stream, transport, &SyncMessage::Done { complete: true })?;
+                return Ok(());
+            };
+            cursor = change.id.sequence;
+            send_sync(stream, transport, &SyncMessage::Change(change))?;
+        }
+        // A capped session is never acknowledged as fully synchronized.
+        let complete = repo
+            .exchange_batch(peer, cursor, 1)
+            .map_err(|e| format!("Sync export: {e:?}"))?
+            .is_empty();
+        send_sync(stream, transport, &SyncMessage::Done { complete })?;
+        if complete {
+            Ok(())
+        } else {
+            Err("Sync page limit reached; retry required".into())
+        }
+    }
+    fn receive_changes(
+        &self,
+        repo: &WordbookRepository,
+        peer: &DeviceId,
+        stream: &mut TcpStream,
+        transport: &mut TransportState,
+        deadline: Instant,
+    ) -> Result<()> {
+        for index in 0..=MAX_SYNC_CHANGES {
+            match receive_sync(stream, transport, deadline)? {
+                SyncMessage::Change(change) => {
+                    if index == MAX_SYNC_CHANGES {
+                        return Err("Sync page limit exceeded".into());
+                    }
+                    let result = repo
+                        .exchange_ingest(peer, &change)
+                        .map_err(|e| format!("Sync ingest: {e:?}"))?;
+                    if result.inserted {
+                        if let Some(app) = &self.app {
+                            let _ = app.emit("learning-data-synced", ());
+                        }
+                    }
+                }
+                SyncMessage::Done { complete: true } => return Ok(()),
+                SyncMessage::Done { complete: false } => {
+                    return Err("Peer has more changes; retry required".into())
+                }
+                _ => return Err("Unexpected sync message".into()),
+            }
+        }
+        Err("Sync page limit exceeded".into())
     }
     fn finish_pairing(
         &self,
@@ -551,12 +880,16 @@ impl LanService {
                 }
                 _ => {}
             }
-            match receive_message(stream, transport, Instant::now() + IO_TIMEOUT) {
-                Ok(Message::Confirm) => received = true,
-                Ok(Message::Cancel) => return Err("Remote device cancelled pairing".into()),
-                Ok(_) => return Err("Unexpected pairing message".into()),
-                Err(e) if e == "timeout" => {}
-                Err(e) => return Err(e),
+            // The peer may already have sent Commit after our Confirm. Once both
+            // confirmations are present, do not read that Commit as a pairing message.
+            if !(sent && received) {
+                match receive_message(stream, transport, Instant::now() + IO_TIMEOUT) {
+                    Ok(Message::Confirm) => received = true,
+                    Ok(Message::Cancel) => return Err("Remote device cancelled pairing".into()),
+                    Ok(_) => return Err("Unexpected pairing message".into()),
+                    Err(e) if e == "timeout" => {}
+                    Err(e) => return Err(e),
+                }
             }
             if sent && received {
                 // Crossing the commit boundary removes the request under the same lock
@@ -595,6 +928,24 @@ impl LanService {
         Err("Pairing timed out".into())
     }
 }
+fn remove_discovered(state: &mut Shared, fullname: &str) {
+    let removed: Vec<_> = state
+        .discovered
+        .iter()
+        .filter(|(_, peer)| peer.fullname == fullname)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for id in removed {
+        state.discovered.remove(&id);
+        state.authenticated.remove(&id);
+        state.reconnect_attempts.remove(&id);
+        if let Some(sync) = state.sync.get_mut(&id) {
+            sync.state = "offline".into();
+            sync.detail = None;
+        }
+    }
+}
+
 fn snow_public(private: &[u8; 32]) -> Result<Vec<u8>> {
     // Noise's 25519 static DH public key, derived from the durable private key.
     Ok(
@@ -618,8 +969,20 @@ enum Message {
     Cancel,
     Commit,
 }
+#[derive(Debug, Serialize, Deserialize)]
+enum SyncMessage {
+    Identity(DeviceId),
+    Start { version: u32, cursor: u64 },
+    Change(Envelope),
+    // Followed by encrypted raw chunks containing exactly length bytes of one Change.
+    ChangeStart { length: usize },
+    Done { complete: bool },
+}
 fn send_frame(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
-    if bytes.is_empty() || bytes.len() > MAX_FRAME {
+    send_bounded_frame(stream, bytes, MAX_FRAME)
+}
+fn send_bounded_frame(stream: &mut TcpStream, bytes: &[u8], max: usize) -> Result<()> {
+    if bytes.is_empty() || bytes.len() > max {
         return Err("Invalid frame size".into());
     }
     stream
@@ -628,6 +991,9 @@ fn send_frame(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
         .map_err(|e| e.to_string())
 }
 fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>> {
+    read_bounded_frame(stream, deadline, MAX_FRAME)
+}
+fn read_bounded_frame(stream: &mut TcpStream, deadline: Instant, max: usize) -> Result<Vec<u8>> {
     let mut length = [0u8; 2];
     // An idle socket can be polled; after one byte arrives, a partial frame must
     // complete or close rather than lose framing on the next poll.
@@ -635,7 +1001,7 @@ fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>> {
     let frame_deadline = deadline.max(Instant::now() + Duration::from_secs(3));
     read_exact_until(stream, &mut length[1..], frame_deadline)?;
     let size = u16::from_be_bytes(length) as usize;
-    if size == 0 || size > MAX_FRAME {
+    if size == 0 || size > max {
         return Err("Invalid frame size".into());
     }
     let mut bytes = vec![0; size];
@@ -682,9 +1048,90 @@ fn receive_message(
         .map_err(|e| e.to_string())?;
     serde_json::from_slice(&plaintext[..len]).map_err(|e| e.to_string())
 }
+fn send_sync_frame(
+    stream: &mut TcpStream,
+    transport: &mut TransportState,
+    plain: &[u8],
+) -> Result<()> {
+    if plain.is_empty() || plain.len() > MAX_SYNC_FRAME - 16 {
+        return Err("Invalid sync frame size".into());
+    }
+    let mut encrypted = vec![0; MAX_SYNC_FRAME];
+    let len = transport
+        .write_message(plain, &mut encrypted)
+        .map_err(|e| e.to_string())?;
+    send_bounded_frame(stream, &encrypted[..len], MAX_SYNC_FRAME)
+}
+fn receive_sync_frame(
+    stream: &mut TcpStream,
+    transport: &mut TransportState,
+    deadline: Instant,
+) -> Result<Vec<u8>> {
+    let frame = read_bounded_frame(stream, deadline, MAX_SYNC_FRAME)?;
+    let mut plain = vec![0; MAX_SYNC_FRAME];
+    let len = transport
+        .read_message(&frame, &mut plain)
+        .map_err(|e| e.to_string())?;
+    if len == 0 {
+        return Err("Empty sync chunk".into());
+    }
+    plain.truncate(len);
+    Ok(plain)
+}
+fn send_sync(
+    stream: &mut TcpStream,
+    transport: &mut TransportState,
+    message: &SyncMessage,
+) -> Result<()> {
+    let plain = serde_json::to_vec(message).map_err(|e| e.to_string())?;
+    if plain.len() > MAX_SYNC_MESSAGE {
+        return Err("Sync operation exceeds message limit".into());
+    }
+    if plain.len() <= MAX_SYNC_FRAME - 16 {
+        return send_sync_frame(stream, transport, &plain);
+    }
+    if !matches!(message, SyncMessage::Change(_)) {
+        return Err("Sync control exceeds frame limit".into());
+    }
+    let start = serde_json::to_vec(&SyncMessage::ChangeStart {
+        length: plain.len(),
+    })
+    .map_err(|e| e.to_string())?;
+    send_sync_frame(stream, transport, &start)?;
+    for chunk in plain.chunks(MAX_SYNC_FRAME - 16) {
+        send_sync_frame(stream, transport, chunk)?;
+    }
+    Ok(())
+}
+fn receive_sync(
+    stream: &mut TcpStream,
+    transport: &mut TransportState,
+    deadline: Instant,
+) -> Result<SyncMessage> {
+    let plain = receive_sync_frame(stream, transport, deadline)?;
+    let message: SyncMessage = serde_json::from_slice(&plain).map_err(|e| e.to_string())?;
+    let SyncMessage::ChangeStart { length } = message else {
+        return Ok(message);
+    };
+    if length <= MAX_SYNC_FRAME - 16 || length > MAX_SYNC_MESSAGE {
+        return Err("Invalid sync operation length".into());
+    }
+    let mut bytes = Vec::with_capacity(length);
+    while bytes.len() < length {
+        let chunk = receive_sync_frame(stream, transport, deadline)?;
+        if chunk.len() > length - bytes.len() {
+            return Err("Sync operation exceeds declared length".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    match serde_json::from_slice(&bytes).map_err(|e| e.to_string())? {
+        change @ SyncMessage::Change(_) => Ok(change),
+        _ => Err("Expected chunked sync operation".into()),
+    }
+}
 impl LanBackend {
-    pub fn open(dir: &Path) -> Self {
-        match LanService::open(dir) {
+    pub fn open(dir: &Path, repository: WordbookRepository, app: tauri::AppHandle) -> Self {
+        match LanService::open_with_repository(dir, Some(repository), Some(app)) {
             Ok(service) => {
                 let error = service.start().err();
                 Self {
@@ -719,6 +1166,7 @@ pub fn lan_status(backend: State<'_, LanBackend>) -> LanStatus {
             pending: vec![],
             trusted: vec![],
             error: backend.error.clone(),
+            sync: vec![],
         },
     }
 }
@@ -748,9 +1196,7 @@ mod tests {
         fs::remove_file(dir.path().join("lan-trust.json")).unwrap();
         fs::write(dir.path().join("lan-identity.json"), b"broken").unwrap();
         assert!(LanService::open(dir.path()).is_err());
-        let backend = LanBackend::open(dir.path());
-        assert!(backend.service.is_none()); // Never starts the listener or mDNS on invalid keys.
-        assert!(backend.error.is_some());
+        assert!(LanService::open(dir.path()).is_err()); // Never starts listener on invalid keys.
     }
     #[test]
     fn direct_trust_only_and_sas_binding() {
@@ -779,6 +1225,38 @@ mod tests {
             .iter()
             .any(|p| p.id == hex::encode(snow_public(&c.key).unwrap())));
         assert_ne!(pairing_code(&[0; 32]), pairing_code(&[1; 32]));
+    }
+    #[test]
+    fn persisted_sync_pin_must_belong_to_directly_trusted_noise_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = LanService::open(dir.path()).unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let c_dir = tempfile::tempdir().unwrap();
+        let b = LanService::open(b_dir.path()).unwrap();
+        let c = LanService::open(c_dir.path()).unwrap();
+        let b_key = snow_public(&b.key).unwrap();
+        a.trust(&b_key, "B").unwrap();
+        let path = dir.path().join("lan-trust.json");
+        let mut saved = load_trust(&path).unwrap();
+        let origin = replay_origin(&b_key).0;
+        saved.sync_ids.insert(identity_id(&b_key), origin.clone());
+        fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert_eq!(
+            LanService::open(dir.path())
+                .unwrap()
+                .state
+                .lock()
+                .unwrap()
+                .sync_ids
+                .len(),
+            1
+        );
+        saved.sync_ids.clear();
+        saved.sync_ids.insert(c.local_id.clone(), origin);
+        fs::write(&path, serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert!(
+            matches!(LanService::open(dir.path()), Err(message) if message == "Invalid pinned replay identity")
+        );
     }
     #[test]
     fn asymmetric_trust_reopens_pairing_on_both_sides() {
@@ -810,8 +1288,10 @@ mod tests {
         assert_eq!(a_pending.code, b_pending.code);
         a.decide(&a_pending.id, Some(&a_pending.code)).unwrap();
         b.decide(&b_pending.id, Some(&b_pending.code)).unwrap();
-        assert!(initiator.join().unwrap().is_ok());
-        assert!(responder.join().unwrap().is_ok());
+        let initiator = initiator.join().unwrap();
+        assert!(initiator.is_ok(), "{initiator:?}");
+        let responder = responder.join().unwrap();
+        assert!(responder.is_ok(), "{responder:?}");
         assert_eq!(b.status().trusted.len(), 1);
         assert_eq!(
             LanService::open(b_dir.path())
@@ -962,7 +1442,8 @@ mod tests {
         a.decide(&ap.id, Some(&ap.code)).unwrap();
         b.decide(&bp.id, Some(&bp.code)).unwrap();
         stale_thread.join().unwrap();
-        assert!(responder.join().unwrap().is_ok());
+        let responder = responder.join().unwrap();
+        assert!(responder.is_ok(), "{responder:?}");
         let deadline = Instant::now() + Duration::from_secs(5);
         while a.status().trusted.is_empty() {
             assert!(Instant::now() < deadline);
@@ -991,6 +1472,344 @@ mod tests {
         );
     }
 
+    fn network_peer(dir: &Path) -> (Arc<LanService>, WordbookRepository) {
+        let repo = WordbookRepository::open(dir.join("words.sqlite")).unwrap();
+        let service = LanService::open_with_repository(dir, Some(repo.clone()), None).unwrap();
+        (service, repo)
+    }
+    fn connect_pair(a: &Arc<LanService>, b: &Arc<LanService>) -> (Result<()>, Result<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let responder = {
+            let b = b.clone();
+            thread::spawn(move || b.session(listener.accept().unwrap().0, false, None))
+        };
+        let initiator = a.session(
+            TcpStream::connect(address).unwrap(),
+            true,
+            Some(&b.local_id),
+        );
+        (initiator, responder.join().unwrap())
+    }
+    fn mutual_trust(a: &LanService, b: &LanService) {
+        a.trust(&snow_public(&b.key).unwrap(), "peer").unwrap();
+        b.trust(&snow_public(&a.key).unwrap(), "peer").unwrap();
+    }
+    #[test]
+    fn first_confirmed_pair_exchanges_fresh_learning_data() {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let (a, ar) = network_peer(ad.path());
+        let (b, br) = network_peer(bd.path());
+        ar.add_favorite("alpha", "甲").unwrap();
+        br.record_mistake("beta", "乙").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let responder = {
+            let b = b.clone();
+            thread::spawn(move || b.session(listener.accept().unwrap().0, false, None))
+        };
+        let initiator = {
+            let a = a.clone();
+            let expected = b.local_id.clone();
+            thread::spawn(move || {
+                a.session(TcpStream::connect(address).unwrap(), true, Some(&expected))
+            })
+        };
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while a.status().pending.is_empty() || b.status().pending.is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "first pairing did not reach confirmation"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        let ap = &a.status().pending[0];
+        let bp = &b.status().pending[0];
+        assert_eq!(ap.code, bp.code);
+        a.decide(&ap.id, Some(&ap.code)).unwrap();
+        b.decide(&bp.id, Some(&bp.code)).unwrap();
+        let initiator = initiator.join().unwrap();
+        assert!(initiator.is_ok(), "{initiator:?}");
+        let responder = responder.join().unwrap();
+        assert!(responder.is_ok(), "{responder:?}");
+        assert_eq!(br.list_favorites().unwrap().len(), 1);
+        assert_eq!(ar.list_mistakes().unwrap()[0].error_count, 1);
+        assert_eq!(
+            LanService::open(ad.path()).unwrap().status().trusted.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn existing_unbound_history_disables_lan_without_clearing_local_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = WordbookRepository::open(dir.path().join("words.sqlite")).unwrap();
+        repo.add_favorite("old", "旧").unwrap();
+        assert!(LanService::open_with_repository(dir.path(), Some(repo.clone()), None).is_err());
+        assert_eq!(repo.list_favorites().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn paired_peer_cannot_claim_third_party_replay_origin_on_first_exchange() {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let cd = tempfile::tempdir().unwrap();
+        let (a, ar) = network_peer(ad.path());
+        let (b, _) = network_peer(bd.path());
+        let (c, _) = network_peer(cd.path());
+        mutual_trust(&a, &b);
+        let forged = replay_origin(&snow_public(&c.key).unwrap());
+        rusqlite::Connection::open(bd.path().join("words.sqlite"))
+            .unwrap()
+            .execute(
+                "UPDATE replay_identity SET device=?1 WHERE singleton=1",
+                [&forged.0],
+            )
+            .unwrap();
+        let (left, right) = connect_pair(&a, &b);
+        assert!(left.is_err() || right.is_err());
+        assert!(ar.list_favorites().unwrap().is_empty());
+        assert!(!a.state.lock().unwrap().sync_ids.contains_key(&b.local_id));
+    }
+
+    #[test]
+    fn network_reconnect_replays_business_changes_and_duplicates() {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let (a, ar) = network_peer(ad.path());
+        let (b, br) = network_peer(bd.path());
+        mutual_trust(&a, &b);
+        ar.add_favorite("alpha", "甲").unwrap();
+        ar.record_mistake("alpha", "甲").unwrap();
+        br.add_favorite("beta", "乙").unwrap();
+        for _ in 0..2 {
+            let (left, right) = connect_pair(&a, &b);
+            assert!(left.is_ok(), "{left:?}");
+            assert!(right.is_ok(), "{right:?}");
+        }
+        assert_eq!(ar.list_favorites().unwrap().len(), 2);
+        assert_eq!(br.list_favorites().unwrap().len(), 2);
+        assert_eq!(br.list_mistakes().unwrap()[0].error_count, 1);
+        drop(a);
+        drop(b);
+        let (a, ar) = network_peer(ad.path());
+        let (b, br) = network_peer(bd.path());
+        br.record_mistake("alpha", "甲").unwrap();
+        let (left, right) = connect_pair(&a, &b);
+        assert!(left.is_ok(), "{left:?}");
+        assert!(right.is_ok(), "{right:?}");
+        assert_eq!(ar.list_mistakes().unwrap()[0].error_count, 2);
+        assert_eq!(br.list_mistakes().unwrap()[0].error_count, 2);
+        assert_eq!(a.status().sync[0].state, "synced");
+    }
+    #[test]
+    fn network_transfers_full_book_across_encrypted_frames() {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let (a, ar) = network_peer(ad.path());
+        let (b, br) = network_peer(bd.path());
+        mutual_trust(&a, &b);
+        let entries: Vec<_> = (0..2000)
+            .map(|n| {
+                serde_json::json!({
+                    "english": format!("word-{n:04}-long-vocabulary-entry"),
+                    "chinese": format!("meaning-{n:04}-long-definition"),
+                })
+            })
+            .collect();
+        // The same atomic import operation emitted by replace(), without exposing its private input type.
+        ar.append_local(
+            serde_json::to_vec(&serde_json::json!({
+                "type": "import", "name": "Full book", "entries": entries,
+            }))
+            .unwrap(),
+            None,
+            &crate::wordbooks::repository::SyncProjection,
+        )
+        .unwrap();
+        let change = ar
+            .exchange_batch(&br.replay_device_id().unwrap(), 0, 1)
+            .unwrap();
+        assert!(
+            serde_json::to_vec(&SyncMessage::Change(change[0].clone()))
+                .unwrap()
+                .len()
+                > MAX_SYNC_FRAME
+        );
+        let (left, right) = connect_pair(&a, &b);
+        assert!(left.is_ok(), "{left:?}");
+        assert!(right.is_ok(), "{right:?}");
+        let books = br.list().unwrap();
+        assert!(books.iter().any(|book| book.name == "Full book"));
+        let book = books.iter().find(|book| book.name == "Full book").unwrap();
+        assert_eq!(br.list_wordbook_entries(book.id).unwrap().len(), 2000);
+    }
+
+    #[test]
+    fn sync_rejects_oversized_and_truncated_chunked_operations() {
+        // Construct real Noise transport states so the framing checks cover authenticated bytes.
+        let a_key = [1u8; 32];
+        let b_key = [2u8; 32];
+        let mut initiator = Builder::new(NOISE.parse().unwrap())
+            .local_private_key(&a_key)
+            .build_initiator()
+            .unwrap();
+        let mut responder = Builder::new(NOISE.parse().unwrap())
+            .local_private_key(&b_key)
+            .build_responder()
+            .unwrap();
+        let mut buffer = [0u8; MAX_FRAME];
+        let len = initiator.write_message(&[], &mut buffer).unwrap();
+        responder
+            .read_message(&buffer[..len], &mut [0u8; MAX_FRAME])
+            .unwrap();
+        let len = responder.write_message(&[], &mut buffer).unwrap();
+        initiator
+            .read_message(&buffer[..len], &mut [0u8; MAX_FRAME])
+            .unwrap();
+        let len = initiator.write_message(&[], &mut buffer).unwrap();
+        responder
+            .read_message(&buffer[..len], &mut [0u8; MAX_FRAME])
+            .unwrap();
+        let mut sender = initiator.into_transport_mode().unwrap();
+        let mut receiver = responder.into_transport_mode().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut outgoing = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut incoming, _) = listener.accept().unwrap();
+        incoming.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+        let oversize = SyncMessage::Change(Envelope {
+            id: crate::wordbooks::repository::replay::ChangeId {
+                device: DeviceId("abcd1234abcd1234abcd1234abcd1234".into()),
+                sequence: 1,
+            },
+            version: 1,
+            content: vec![255; MAX_SYNC_MESSAGE / 3],
+            dependencies: Default::default(),
+            occurred_at: None,
+        });
+        assert_eq!(
+            send_sync(&mut outgoing, &mut sender, &oversize).unwrap_err(),
+            "Sync operation exceeds message limit"
+        );
+        send_sync_frame(
+            &mut outgoing,
+            &mut sender,
+            &serde_json::to_vec(&SyncMessage::ChangeStart {
+                length: MAX_SYNC_MESSAGE + 1,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            receive_sync(
+                &mut incoming,
+                &mut receiver,
+                Instant::now() + Duration::from_secs(2)
+            )
+            .unwrap_err(),
+            "Invalid sync operation length"
+        );
+        send_sync_frame(
+            &mut outgoing,
+            &mut sender,
+            &serde_json::to_vec(&SyncMessage::ChangeStart {
+                length: MAX_SYNC_FRAME,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        send_sync_frame(&mut outgoing, &mut sender, b"incomplete").unwrap();
+        drop(outgoing);
+        assert_eq!(
+            receive_sync(
+                &mut incoming,
+                &mut receiver,
+                Instant::now() + Duration::from_secs(2)
+            )
+            .unwrap_err(),
+            "Peer disconnected"
+        );
+    }
+
+    #[test]
+    fn removed_service_marks_trusted_sync_offline_and_preserves_last_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let service = LanService::open(dir.path()).unwrap();
+        let other = [7u8; 32];
+        service.trust(&other, "remote").unwrap();
+        let id = identity_id(&other);
+        service.set_sync(&id, "synced", None, true);
+        let prior = service.status().sync[0].last_sync.clone();
+        {
+            let mut state = service.state.lock().unwrap();
+            state.discovered.insert(
+                id.clone(),
+                Discovered {
+                    fullname: "remote.local.".into(),
+                    name: "remote".into(),
+                    addresses: vec![],
+                },
+            );
+            state.authenticated.insert(id.clone());
+            remove_discovered(&mut state, "remote.local.");
+        }
+        // A session that finishes after mDNS removal cannot restore a stale online state.
+        service.set_sync(&id, "synced", None, true);
+        let status = service.status();
+        assert!(status.peers.is_empty());
+        assert_eq!(status.sync[0].id, hex::encode(other));
+        assert_eq!(status.sync[0].state, "offline");
+        assert_eq!(status.sync[0].last_sync, prior);
+        assert!(!service.state.lock().unwrap().authenticated.contains(&id));
+        service.set_sync(&id, "syncing", None, false);
+        service.set_sync(&id, "synced", None, true);
+        assert_eq!(service.status().sync[0].state, "synced");
+    }
+
+    #[test]
+    fn network_rejects_third_party_and_unpaired_peer() {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let cd = tempfile::tempdir().unwrap();
+        let (a, ar) = network_peer(ad.path());
+        let (b, br) = network_peer(bd.path());
+        let (c, cr) = network_peer(cd.path());
+        mutual_trust(&a, &b);
+        mutual_trust(&b, &c);
+        cr.add_favorite("secret", "丙").unwrap();
+        let (left, right) = connect_pair(&b, &c);
+        assert!(left.is_ok(), "{left:?}");
+        assert!(right.is_ok(), "{right:?}");
+        assert!(ar.list_favorites().unwrap().is_empty());
+        let (left, right) = connect_pair(&a, &b);
+        assert!(left.is_ok(), "{left:?}");
+        assert!(right.is_ok(), "{right:?}");
+        assert!(ar.list_favorites().unwrap().is_empty());
+        br.add_favorite("dependent", "乙").unwrap();
+        let (left, right) = connect_pair(&a, &b);
+        assert!(left.is_err() || right.is_err());
+        assert!(ar.list_favorites().unwrap().is_empty());
+        assert!(matches!(
+            br.exchange_batch(&ar.replay_device_id().unwrap(), 0, 16),
+            Err(crate::wordbooks::repository::replay::ReplayError::UnshareableDependency(_))
+        ));
+        assert!(!a
+            .state
+            .lock()
+            .unwrap()
+            .trusted
+            .contains_key(&hex::encode(snow_public(&c.key).unwrap())));
+        assert!(ar.list_favorites().unwrap().is_empty());
+        let forged = cr
+            .exchange_batch(&br.replay_device_id().unwrap(), 0, 1)
+            .unwrap()
+            .remove(0);
+        assert!(matches!(
+            ar.exchange_ingest(&br.replay_device_id().unwrap(), &forged),
+            Err(crate::wordbooks::repository::replay::ReplayError::UnauthorizedOrigin)
+        ));
+    }
     #[test]
     fn mismatch_cancels() {
         let dir = tempfile::tempdir().unwrap();

@@ -51,6 +51,44 @@ it("requires the entered peer code before allowing confirmation", async () => {
     expect(lanService.confirm).toHaveBeenCalledWith("handshake-1", "99999999"),
   );
 });
+it("shows per-peer synchronization results", async () => {
+  vi.mocked(lanService.status).mockResolvedValue({
+    peers: [],
+    pending: [],
+    error: null,
+    trusted: [{ id: "peer-1", name: "学习设备" }],
+    sync: [
+      { id: "peer-1", state: "error", detail: "连接中断", last_sync: null },
+    ],
+  });
+  render(
+    <App
+      wordbookService={wordbookService}
+      history={createMemoryHistory({ initialEntries: ["/devices"] })}
+    />,
+  );
+  expect(await screen.findByText(/同步失败；连接中断/)).toBeInTheDocument();
+});
+it("shows offline peer feedback while preserving previous sync time", async () => {
+  vi.mocked(lanService.status).mockResolvedValue({
+    peers: [],
+    pending: [],
+    error: null,
+    trusted: [{ id: "peer-1", name: "学习设备" }],
+    sync: [
+      { id: "peer-1", state: "offline", detail: null, last_sync: "1700000000" },
+    ],
+  });
+  render(
+    <App
+      wordbookService={wordbookService}
+      history={createMemoryHistory({ initialEntries: ["/devices"] })}
+    />,
+  );
+  expect(
+    await screen.findByText(/设备离线，等待重连；上次同步/),
+  ).toBeInTheDocument();
+});
 
 it("reports LAN unavailability without blocking local navigation", async () => {
   vi.mocked(lanService.status).mockResolvedValue({

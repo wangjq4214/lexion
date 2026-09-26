@@ -4,12 +4,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { WordbookService } from "../data/wordbooks";
 import type { WordEntry } from "../domain/word";
 import { FavoritesList } from "../features/favorites/FavoritesList";
-import { favoritesVersionAtom } from "../state/appState";
+import { favoritesVersionAtom, syncedDataVersionAtom } from "../state/appState";
 
 function FavoritesPage() {
   const { props } = Route.useRouteContext();
   const service: WordbookService = props.wordbookService;
   const version = useAtomValue(favoritesVersionAtom);
+  const syncedVersion = useAtomValue(syncedDataVersionAtom);
   const navigate = useNavigate();
   const fromSetup = Route.useSearch().from === "practice-setup";
   const [entries, setEntries] = useState<WordEntry[] | null>(null);
@@ -43,7 +44,7 @@ function FavoritesPage() {
       mounted = false;
       requestRef.current++;
     };
-  }, [load, version]);
+  }, [load, version, syncedVersion]);
   const remove = async (entry: WordEntry) => {
     if (removingId !== null) return;
     setRemovingId(entry.id);

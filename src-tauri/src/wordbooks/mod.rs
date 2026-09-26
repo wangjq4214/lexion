@@ -1,6 +1,6 @@
 mod import;
 mod model;
-mod repository;
+pub(crate) mod repository;
 
 use serde::Serialize;
 use tauri::State;

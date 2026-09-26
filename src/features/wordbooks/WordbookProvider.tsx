@@ -1,3 +1,5 @@
+import { isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useSetAtom } from "jotai";
 import {
   createContext,
@@ -9,6 +11,7 @@ import {
 import type { WordbookService } from "../../data/wordbooks";
 import {
   activeWordbookAtom,
+  syncedDataVersionAtom,
   wordbooksAtom,
   wordbooksErrorAtom,
 } from "../../state/appState";
@@ -32,6 +35,7 @@ export function WordbookProvider({
   const setWordbooks = useSetAtom(wordbooksAtom);
   const setLoadError = useSetAtom(wordbooksErrorAtom);
   const setActiveId = useSetAtom(activeWordbookAtom);
+  const setSyncedVersion = useSetAtom(syncedDataVersionAtom);
   const refresh = useCallback(
     async (preferredId?: number) => {
       try {
@@ -72,6 +76,23 @@ export function WordbookProvider({
       current = false;
     };
   }, [service, setWordbooks, setLoadError, setActiveId]);
+  useEffect(() => {
+    if (!isTauri()) return;
+    let mounted = true;
+    let unlisten: (() => void) | undefined;
+    void listen("learning-data-synced", () => {
+      if (!mounted) return;
+      void refresh();
+      setSyncedVersion((value) => value + 1);
+    }).then((stop) => {
+      if (mounted) unlisten = stop;
+      else stop();
+    });
+    return () => {
+      mounted = false;
+      unlisten?.();
+    };
+  }, [refresh, setSyncedVersion]);
   return (
     <RefreshContext.Provider value={refresh}>
       {children}

@@ -12,7 +12,7 @@ import type { WordbookService, WordbookSummary } from "../data/wordbooks";
 import type { WordEntry } from "../domain/word";
 import { WordbookImportFlow } from "../features/wordbooks/WordbookImportFlow";
 import { useRefreshWordbooks } from "../features/wordbooks/WordbookProvider";
-import { wordbooksAtom } from "../state/appState";
+import { syncedDataVersionAtom, wordbooksAtom } from "../state/appState";
 
 function WordbooksPage() {
   const { props } = Route.useRouteContext();
@@ -20,6 +20,7 @@ function WordbooksPage() {
   const navigate = useNavigate();
   const refreshWordbooks = useRefreshWordbooks();
   const wordbooks = useAtomValue(wordbooksAtom) ?? [];
+  const syncedVersion = useAtomValue(syncedDataVersionAtom);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const selected =
     wordbooks.find(({ id }) => id === selectedId) ?? wordbooks[0];
@@ -29,11 +30,13 @@ function WordbooksPage() {
     bookId: number;
     revision: number;
     items: WordEntry[];
+    syncedVersion: number;
   } | null>(null);
   const entries =
     entryResult !== null &&
     entryResult.bookId === selectedBookId &&
-    entryResult.revision === revision
+    entryResult.revision === revision &&
+    entryResult.syncedVersion === syncedVersion
       ? entryResult.items
       : null;
   const [loadFailure, setLoadFailure] = useState<{
@@ -65,7 +68,12 @@ function WordbooksPage() {
       (items) => {
         if (current) {
           setLoadFailure(null);
-          setEntryResult({ bookId: selectedBookId, revision, items });
+          setEntryResult({
+            bookId: selectedBookId,
+            revision,
+            syncedVersion,
+            items,
+          });
         }
       },
       (error) => {
@@ -80,7 +88,7 @@ function WordbooksPage() {
     return () => {
       current = false;
     };
-  }, [service, selectedBookId, revision]);
+  }, [service, selectedBookId, revision, syncedVersion]);
 
   const removeBook = async () => {
     const target = deleteBook;

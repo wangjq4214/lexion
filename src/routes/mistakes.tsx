@@ -1,12 +1,15 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useAtomValue } from "jotai";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { MistakeEntry, WordbookService } from "../data/wordbooks";
 import { MistakesList } from "../features/mistakes/MistakesList";
+import { syncedDataVersionAtom } from "../state/appState";
 
 function MistakesPage() {
   const { props } = Route.useRouteContext();
   const service: WordbookService = props.wordbookService;
   const navigate = useNavigate();
+  const syncedVersion = useAtomValue(syncedDataVersionAtom);
   const fromSetup = Route.useSearch().from === "practice-setup";
   const [entries, setEntries] = useState<MistakeEntry[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -25,6 +28,7 @@ function MistakesPage() {
       },
     );
   }, [service]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: syncedVersion invalidates the visible collection after remote commit.
   useEffect(() => {
     let mounted = true;
     const requestRef = request;
@@ -35,7 +39,7 @@ function MistakesPage() {
       mounted = false;
       requestRef.current++;
     };
-  }, [load]);
+  }, [load, syncedVersion]);
   return (
     <MistakesList
       entries={entries}

@@ -58,7 +58,7 @@ function DevicesPage() {
         </Stack>
       </Section>
       <Text color="secondary">
-        首次配对请在两台设备上核对相同的八位数字，并分别输入对方屏幕上的数字确认。配对仅授权这两台设备；学习数据交换将在后续版本提供。
+        首次配对请在两台设备上核对相同的八位数字，并分别输入对方屏幕上的数字确认。配对仅授权这两台设备；再次相遇时会自动交换学习变更。
       </Text>
       {loadError ? <Text role="alert">连接服务失败：{loadError}</Text> : null}
       {actionError ? (
@@ -171,7 +171,26 @@ function DevicesPage() {
               <ListItem
                 key={peer.id}
                 label={peer.name}
-                description="已直接配对；再次相遇无需重新核对"
+                description={(() => {
+                  const sync = status.sync?.find((item) => item.id === peer.id);
+                  if (!sync) return "已直接配对；等待再次相遇自动同步";
+                  const timestamp = Number(sync.last_sync);
+                  const time =
+                    sync.last_sync && Number.isFinite(timestamp)
+                      ? `；上次同步：${new Date(timestamp * 1000).toLocaleString()}`
+                      : "";
+                  const state =
+                    sync.state === "synced"
+                      ? "同步完成"
+                      : sync.state === "syncing"
+                        ? "正在同步"
+                        : sync.state === "error"
+                          ? "同步失败"
+                          : sync.state === "offline"
+                            ? "设备离线，等待重连"
+                            : "等待同步";
+                  return `${state}${time}${sync.detail ? `；${sync.detail}` : ""}`;
+                })()}
               />
             ))}
           </List>

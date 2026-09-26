@@ -1,12 +1,11 @@
-//! Internal durable operation log. Business projections must own only their own tables:
-//! `reset` must never clear existing wordbook/review tables until T0002/T0003 have
-//! migrated *all* their writes to this boundary. Remote replay never appends locally.
+//! Internal durable operation log. Business projections own their own tables.
+//! Remote replay never appends locally.
 use std::collections::{BTreeMap, BTreeSet};
 
 use rusqlite::{params, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
-use super::WordbookRepository;
+use super::{SyncProjection, WordbookRepository};
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct DeviceId(pub String);
@@ -17,7 +16,7 @@ pub struct ChangeId {
     pub sequence: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Envelope {
     pub id: ChangeId,
     pub version: u32,
@@ -37,6 +36,8 @@ pub enum ReplayError {
     SequenceExhausted,
     Cycle,
     Projection(String),
+    UnauthorizedOrigin,
+    UnshareableDependency(ChangeId),
 }
 impl From<rusqlite::Error> for ReplayError {
     fn from(value: rusqlite::Error) -> Self {
@@ -513,7 +514,7 @@ impl WordbookRepository {
 
     /// A cursor is a per-origin *contiguous* watermark, not a global arrival index.
     /// Only applied operations are exported; missing predecessors never leak as complete.
-    /// Authorization/filtering of origins and dependencies is the caller's T0005 duty.
+    /// Internal unrestricted export for replay tests; network export uses `exchange_batch`.
     pub(crate) fn changes_since(
         &self,
         cursors: &BTreeMap<DeviceId, u64>,
@@ -548,6 +549,161 @@ impl WordbookRepository {
             }
         }
         Ok(output)
+    }
+
+    /// Bind a fresh replay identity to the authenticated LAN static key before any
+    /// local operation is written. Historical operations are never rewritten or cleared.
+    pub(crate) fn bind_replay_origin(&self, expected: &DeviceId) -> Result<(), ReplayError> {
+        if expected.0.len() != 32
+            || !expected
+                .0
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(ReplayError::Invalid("invalid bound replay identity"));
+        }
+        let mut conn = self.connect()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (current, _) = enabled(&tx)?;
+        if current != *expected {
+            let count: i64 =
+                tx.query_row("SELECT COUNT(*) FROM replay_changes", [], |row| row.get(0))?;
+            if count != 0 {
+                return Err(ReplayError::Invalid(
+                    "existing replay history is not bound to LAN identity",
+                ));
+            }
+            tx.execute(
+                "UPDATE replay_identity SET device=?1 WHERE singleton=1",
+                [&expected.0],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Applied, contiguous watermarks for only the two directly authorized origins.
+    pub(crate) fn exchange_cursors(
+        &self,
+        peer: &DeviceId,
+    ) -> Result<BTreeMap<DeviceId, u64>, ReplayError> {
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        let (local, _) = enabled(&tx)?;
+        if *peer == local {
+            return Err(ReplayError::UnauthorizedOrigin);
+        }
+        let mut result = BTreeMap::new();
+        for origin in [&local, peer] {
+            let mut stmt = tx.prepare("SELECT sequence FROM replay_changes WHERE device=?1 AND applied=1 ORDER BY sequence")?;
+            let mut rows = stmt.query([&origin.0])?;
+            let mut contiguous = 0u64;
+            while let Some(row) = rows.next()? {
+                let sequence = row.get::<_, i64>(0)? as u64;
+                if sequence != contiguous + 1 {
+                    break;
+                }
+                contiguous = sequence;
+            }
+            result.insert(origin.clone(), contiguous);
+        }
+        Ok(result)
+    }
+
+    /// Export only our own operations. Reject an unshareable causal suffix rather
+    /// than forwarding third-party history or pretending its cursor advanced.
+    pub(crate) fn exchange_batch(
+        &self,
+        peer: &DeviceId,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<Envelope>, ReplayError> {
+        if limit == 0 || limit > 16 {
+            return Err(ReplayError::Invalid("invalid batch limit"));
+        }
+        if after > i64::MAX as u64 {
+            return Err(ReplayError::Invalid("invalid exchange cursor"));
+        }
+        let local = self.replay_device_id()?;
+        if local == *peer {
+            return Err(ReplayError::UnauthorizedOrigin);
+        }
+        let mut conn = self.connect()?;
+        let tx = conn.transaction()?;
+        enabled(&tx)?;
+        let changes = load(&tx)?;
+        let mut output = Vec::new();
+        let mut next = after.checked_add(1).ok_or(ReplayError::SequenceExhausted)?;
+        for change in changes
+            .values()
+            .filter(|change| change.id.device == local && change.id.sequence > after)
+        {
+            if output.len() == limit {
+                break;
+            }
+            if change.id.sequence != next {
+                break;
+            }
+            let applied: bool = tx.query_row(
+                "SELECT applied FROM replay_changes WHERE device=?1 AND sequence=?2",
+                params![local.0, next as i64],
+                |row| row.get(0),
+            )?;
+            if !applied {
+                break;
+            }
+            if let Some(dependency) = change
+                .dependencies
+                .iter()
+                .find(|dep| dep.device != local && dep.device != *peer)
+            {
+                return Err(ReplayError::UnshareableDependency(dependency.clone()));
+            }
+            output.push(change.clone());
+            next += 1;
+        }
+        Ok(output)
+    }
+
+    /// Authenticated peer identity is supplied by the Noise boundary, never by the wire.
+    /// Reject foreign origins and causal predecessors before opening a write transaction.
+    pub(crate) fn exchange_ingest(
+        &self,
+        peer: &DeviceId,
+        change: &Envelope,
+    ) -> Result<IngestResult, ReplayError> {
+        let local = self.replay_device_id()?;
+        if *peer == local || change.id.device != *peer {
+            return Err(ReplayError::UnauthorizedOrigin);
+        }
+        valid(change)?;
+        if let Some(dependency) = change
+            .dependencies
+            .iter()
+            .find(|dep| dep.device != local && dep.device != *peer)
+        {
+            return Err(ReplayError::UnshareableDependency(dependency.clone()));
+        }
+        if change.version != 1 {
+            return Err(ReplayError::Invalid("unsupported operation version"));
+        }
+        let cursors = self.exchange_cursors(peer)?;
+        let current = cursors[peer];
+        if change.id.sequence > current.saturating_add(1) {
+            return Err(ReplayError::Invalid("non-contiguous exchange operation"));
+        }
+        if change
+            .dependencies
+            .iter()
+            .any(|dep| dep.sequence > cursors[&dep.device])
+        {
+            return Err(ReplayError::Invalid("unavailable causal predecessor"));
+        }
+        let result = self.ingest(change, &SyncProjection)?;
+        if !result.unsupported_versions.is_empty() || !result.missing.is_empty() {
+            return Err(ReplayError::Invalid("incomplete exchange operation"));
+        }
+        Ok(result)
     }
 }
 

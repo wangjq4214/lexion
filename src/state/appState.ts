@@ -20,4 +20,5 @@ export const wordbooksErrorAtom = atom<string | null>(null);
 export const roundStartedAtAtom = atom<number | null>(null);
 export const roundKeyAtom = atom(0);
 export const favoritesVersionAtom = atom(0);
+export const syncedDataVersionAtom = atom(0);
 export const favoriteWriteErrorAtom = atom<string | null>(null);

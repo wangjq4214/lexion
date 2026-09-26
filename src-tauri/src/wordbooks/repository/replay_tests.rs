@@ -80,6 +80,90 @@ fn repo(path: &std::path::Path, name: &str) -> WordbookRepository {
 }
 
 #[test]
+fn binding_replay_origin_requires_empty_history_and_survives_restart() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("bound.sqlite");
+    let repo = WordbookRepository::open(&path).unwrap();
+    let bound = DeviceId("abcd1234abcd1234abcd1234abcd1234".into());
+    repo.bind_replay_origin(&bound).unwrap();
+    assert_eq!(repo.replay_device_id().unwrap(), bound);
+    repo.add_favorite("alpha", "甲").unwrap();
+    assert_eq!(
+        WordbookRepository::open(&path)
+            .unwrap()
+            .replay_device_id()
+            .unwrap(),
+        bound
+    );
+    assert!(matches!(
+        repo.bind_replay_origin(&DeviceId("ffff1234abcd1234abcd1234abcd1234".into())),
+        Err(ReplayError::Invalid(
+            "existing replay history is not bound to LAN identity"
+        ))
+    ));
+    assert_eq!(repo.list_favorites().unwrap().len(), 1);
+}
+
+#[test]
+fn exchange_rejects_spoofed_origin_dependencies_gaps_and_legacy() {
+    let dir = tempdir().unwrap();
+    let a = repo(dir.path(), "a");
+    let b = repo(dir.path(), "b");
+    let c = repo(dir.path(), "c");
+    b.add_favorite("first", "一").unwrap();
+    let first = b
+        .exchange_batch(&a.replay_device_id().unwrap(), 0, 1)
+        .unwrap()
+        .remove(0);
+    c.add_favorite("third", "三").unwrap();
+    let c_change = c
+        .exchange_batch(&b.replay_device_id().unwrap(), 0, 1)
+        .unwrap()
+        .remove(0);
+    assert!(matches!(
+        a.exchange_ingest(&b.replay_device_id().unwrap(), &c_change),
+        Err(ReplayError::UnauthorizedOrigin)
+    ));
+    let mut forged = first.clone();
+    forged.dependencies.insert(c_change.id.clone());
+    assert!(matches!(
+        a.exchange_ingest(&b.replay_device_id().unwrap(), &forged),
+        Err(ReplayError::UnshareableDependency(_))
+    ));
+    assert!(a.list_favorites().unwrap().is_empty());
+    assert!(
+        a.exchange_ingest(&b.replay_device_id().unwrap(), &first)
+            .unwrap()
+            .inserted
+    );
+    assert!(
+        !a.exchange_ingest(&b.replay_device_id().unwrap(), &first)
+            .unwrap()
+            .inserted
+    );
+    let mut gap = first.clone();
+    gap.id.sequence = 3;
+    assert!(matches!(
+        a.exchange_ingest(&b.replay_device_id().unwrap(), &gap),
+        Err(ReplayError::Invalid("non-contiguous exchange operation"))
+    ));
+    assert_eq!(a.list_favorites().unwrap().len(), 1);
+    let legacy_path = dir.path().join("legacy");
+    {
+        let conn = rusqlite::Connection::open(&legacy_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE favorites (english TEXT); INSERT INTO favorites VALUES ('old');",
+        )
+        .unwrap();
+    }
+    let legacy = WordbookRepository::open(&legacy_path).unwrap();
+    assert!(matches!(
+        legacy.exchange_cursors(&b.replay_device_id().unwrap()),
+        Err(ReplayError::LegacyBaseline)
+    ));
+}
+
+#[test]
 fn three_devices_late_delete_converge_and_clock_never_orders() {
     let dir = tempdir().unwrap();
     let a = repo(dir.path(), "a");
