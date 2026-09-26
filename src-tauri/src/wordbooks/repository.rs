@@ -4,6 +4,8 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::model::{ExamQuestion, ImportedEntry, MistakeEntry, WordEntry, WordbookSummary};
 
+#[path = "repository/content.rs"]
+mod content;
 pub(crate) mod replay;
 #[path = "schedule.rs"]
 mod schedule;
@@ -13,6 +15,7 @@ pub enum RepositoryError {
     Conflict,
     Validation(&'static str),
     Database(rusqlite::Error),
+    Replay(replay::ReplayError),
 }
 
 impl From<rusqlite::Error> for RepositoryError {
@@ -39,6 +42,21 @@ impl WordbookRepository {
         let connection = Connection::open(&self.database_path)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         Ok(connection)
+    }
+
+    fn sync_enabled(&self) -> Result<bool, RepositoryError> {
+        let connection = self.connect()?;
+        Ok(!connection.query_row(
+            "SELECT legacy FROM replay_identity WHERE singleton=1",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?)
+    }
+
+    fn record_content(&self, change: content::ContentChange) -> Result<(), RepositoryError> {
+        self.append_local(change.encode(), None, &content::ContentProjection)
+            .map_err(RepositoryError::Replay)?;
+        Ok(())
     }
 
     fn initialize(&self) -> Result<(), rusqlite::Error> {
@@ -203,6 +221,43 @@ impl WordbookRepository {
         replace_existing: bool,
     ) -> Result<WordbookSummary, RepositoryError> {
         let mut connection = self.connect()?;
+        if self.sync_enabled()? {
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(RepositoryError::Validation("单词本名称不能为空"));
+            }
+            let change = content::ContentChange::Import {
+                name: name.to_owned(),
+                entries: entries
+                    .iter()
+                    .map(|entry| content::Entry {
+                        english: entry.english.clone(),
+                        chinese: entry.chinese.clone(),
+                    })
+                    .collect(),
+            };
+            self.append_local_checked(change.encode(), None, &content::ContentProjection, |tx| {
+                if !replace_existing
+                    && tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM wordbooks WHERE name=?1)",
+                        [name],
+                        |row| row.get::<_, bool>(0),
+                    )?
+                {
+                    return Err(replay::ReplayError::BusinessConflict);
+                }
+                Ok(())
+            })
+            .map_err(|error| match error {
+                replay::ReplayError::BusinessConflict => RepositoryError::Conflict,
+                other => RepositoryError::Replay(other),
+            })?;
+            return Ok(self
+                .list()?
+                .into_iter()
+                .find(|book| book.name == name)
+                .expect("imported wordbook must exist"));
+        }
         let transaction = connection.transaction()?;
         let existing_id: Option<i64> = transaction
             .query_row("SELECT id FROM wordbooks WHERE name = ?1", [name], |row| {
@@ -239,6 +294,21 @@ impl WordbookRepository {
             return Err(RepositoryError::Validation("单词本 ID 必须大于零"));
         }
         let mut connection = self.connect()?;
+        if self.sync_enabled()? {
+            let name: Option<String> = self
+                .connect()?
+                .query_row(
+                    "SELECT name FROM wordbooks WHERE id=?1",
+                    [wordbook_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(name) = name else {
+                return Ok(false);
+            };
+            self.record_content(content::ContentChange::DeleteBook { name })?;
+            return Ok(true);
+        }
         let transaction = connection.transaction()?;
         let deleted = transaction.execute("DELETE FROM wordbooks WHERE id = ?1", [wordbook_id])?;
         if deleted != 0 {
@@ -259,6 +329,27 @@ impl WordbookRepository {
             return Err(RepositoryError::Validation("单词本和词条 ID 必须大于零"));
         }
         let mut connection = self.connect()?;
+        if self.sync_enabled()? {
+            let target: Option<(String, String, String)> = self
+                .connect()?
+                .query_row(
+                    "SELECT wordbooks.name, entries.normalized_english, entries.chinese
+                 FROM entries JOIN wordbooks ON entries.wordbook_id=wordbooks.id
+                 WHERE entries.id=?1 AND wordbooks.id=?2",
+                    params![entry_id, wordbook_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((name, normalized_english, chinese)) = target else {
+                return Ok(false);
+            };
+            self.record_content(content::ContentChange::DeleteEntry {
+                name,
+                normalized_english,
+                chinese,
+            })?;
+            return Ok(true);
+        }
         let transaction = connection.transaction()?;
         let pair: Option<(String, String)> = transaction
             .query_row(
@@ -308,6 +399,18 @@ impl WordbookRepository {
     pub fn add_favorite(&self, english: &str, chinese: &str) -> Result<WordEntry, RepositoryError> {
         let (english, chinese) = favorite_pair(english, chinese)?;
         let connection = self.connect()?;
+        if self.sync_enabled()? {
+            if !self.is_favorite(english, chinese)? {
+                self.record_content(content::ContentChange::AddFavorite {
+                    english: english.to_owned(),
+                    chinese: chinese.to_owned(),
+                })?;
+            }
+            return Ok(self.connect()?.query_row(
+                "SELECT id,english,chinese FROM favorites WHERE normalized_english=?1 AND chinese=?2",
+                params![english.to_lowercase(), chinese], word_entry,
+            )?);
+        }
         connection.execute(
             "INSERT OR IGNORE INTO favorites(english, chinese, normalized_english)
              VALUES (?1, ?2, ?3)",
@@ -324,6 +427,16 @@ impl WordbookRepository {
     pub fn remove_favorite(&self, english: &str, chinese: &str) -> Result<bool, RepositoryError> {
         let (english, chinese) = favorite_pair(english, chinese)?;
         let mut connection = self.connect()?;
+        if self.sync_enabled()? {
+            if !self.is_favorite(english, chinese)? {
+                return Ok(false);
+            }
+            self.record_content(content::ContentChange::RemoveFavorite {
+                normalized_english: english.to_lowercase(),
+                chinese: chinese.to_owned(),
+            })?;
+            return Ok(true);
+        }
         let transaction = connection.transaction()?;
         let removed = transaction.execute(
             "DELETE FROM favorites WHERE normalized_english = ?1 AND chinese = ?2",
@@ -577,6 +690,9 @@ fn word_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordEntry> {
     })
 }
 
+#[cfg(test)]
+#[path = "repository/content_tests.rs"]
+mod content_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1083,7 +1199,7 @@ mod tests {
 
         assert!(matches!(
             repository.replace("同名", &duplicate_entries, true),
-            Err(RepositoryError::Database(_))
+            Err(RepositoryError::Replay(replay::ReplayError::Invalid(_)))
         ));
         let listed = repository.list().unwrap();
         assert_eq!(listed, vec![original.clone()]);

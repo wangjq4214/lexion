@@ -2,7 +2,7 @@
 
 **Ticket ID:** T0002
 **Source:** [Spec 0004](../../spec/0004-offline-lan-learning-data-sync.md) §Requirement 1–3；[ADR 0001](../../adr/0001-store-imported-wordbooks-in-sqlite.md)、[ADR 0002](../../adr/0002-preserve-favorites-independent-of-wordbooks.md)、[ADR 0008](../../adr/0008-keep-practice-entry-deletion-alongside-central-management.md)、[ADR 0009](../../adr/0009-support-offline-multi-device-lan-sync.md)
-**Status:** Todo
+**Status:** Done
 
 ## Goal
 

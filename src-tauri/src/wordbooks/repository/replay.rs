@@ -32,6 +32,7 @@ pub enum ReplayError {
     Database(rusqlite::Error),
     Invalid(&'static str),
     Conflict(ChangeId),
+    BusinessConflict,
     LegacyBaseline,
     SequenceExhausted,
     Cycle,
@@ -50,6 +51,14 @@ pub trait Projection {
     fn validate(&self, change: &Envelope) -> Result<(), ReplayError>;
     fn reset(&self, tx: &Transaction<'_>) -> Result<(), ReplayError>;
     fn apply(&self, tx: &Transaction<'_>, change: &Envelope) -> Result<(), ReplayError>;
+    /// Restore local-only projection state after a reordered full replay, excluding new invalidations.
+    fn finish_rebuild(
+        &self,
+        _tx: &Transaction<'_>,
+        _newly_applied: &[Envelope],
+    ) -> Result<(), ReplayError> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -333,9 +342,36 @@ fn rebuild(
     };
     let ready: BTreeSet<_> = ordered.iter().cloned().collect();
     if currently_applied != ready {
-        projection.reset(tx)?;
-        for id in &ordered {
+        // An extension of the already-applied canonical prefix can be projected without
+        // clearing unrelated local review coverage. A late operation before that prefix
+        // still requires a full deterministic rebuild.
+        let prefix = if currently_applied.is_empty() {
+            false
+        } else {
+            let previous: BTreeMap<_, _> = changes
+                .iter()
+                .filter(|(id, _)| currently_applied.contains(*id))
+                .map(|(id, change)| (id.clone(), change.clone()))
+                .collect();
+            let (previous_order, _) = canonical_order(&previous)?;
+            ordered.starts_with(&previous_order)
+        };
+        if !prefix {
+            projection.reset(tx)?;
+        }
+        for id in ordered
+            .iter()
+            .skip(if prefix { currently_applied.len() } else { 0 })
+        {
             projection.apply(tx, &changes[id])?;
+        }
+        if !prefix {
+            let new: Vec<_> = ordered
+                .iter()
+                .filter(|id| !currently_applied.contains(*id))
+                .map(|id| changes[id].clone())
+                .collect();
+            projection.finish_rebuild(tx, &new)?;
         }
         tx.execute("UPDATE replay_changes SET applied=0", [])?;
         for id in &ordered {
@@ -366,8 +402,20 @@ impl WordbookRepository {
         occurred_at: Option<i64>,
         projection: &impl Projection,
     ) -> Result<Envelope, ReplayError> {
+        self.append_local_checked(content, occurred_at, projection, |_| Ok(()))
+    }
+
+    /// Check business preconditions under the same write lock as the operation and log.
+    pub(crate) fn append_local_checked(
+        &self,
+        content: Vec<u8>,
+        occurred_at: Option<i64>,
+        projection: &impl Projection,
+        check: impl FnOnce(&Transaction<'_>) -> Result<(), ReplayError>,
+    ) -> Result<Envelope, ReplayError> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        check(&tx)?;
         let (device, next) = enabled(&tx)?;
         if next >= i64::MAX as u64 {
             return Err(ReplayError::SequenceExhausted);

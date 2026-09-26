@@ -1,7 +1,7 @@
 # 局域网离线学习数据同步
 
 **Spec ID:** 0004
-**Status:** Draft
+**Status:** In Progress
 **Date:** 2026-09-26
 
 ## Requirement

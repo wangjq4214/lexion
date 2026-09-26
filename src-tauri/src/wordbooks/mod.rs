@@ -64,6 +64,7 @@ fn map_repository_error(error: repository::RepositoryError) -> CommandError {
             CommandError::Validation(message.to_owned())
         }
         repository::RepositoryError::Database(error) => CommandError::Database(error.to_string()),
+        repository::RepositoryError::Replay(error) => CommandError::Database(format!("{error:?}")),
     }
 }
 
