@@ -9,9 +9,10 @@ fn pair(english: &str, chinese: &str) -> ImportedEntry {
     }
 }
 
-fn snapshot(
-    repo: &WordbookRepository,
-) -> (Vec<(String, Vec<(String, String)>)>, Vec<(String, String)>) {
+type WordPair = (String, String);
+type ContentSnapshot = (Vec<(String, Vec<WordPair>)>, Vec<WordPair>);
+
+fn snapshot(repo: &WordbookRepository) -> ContentSnapshot {
     let mut books: Vec<_> = repo
         .list()
         .unwrap()

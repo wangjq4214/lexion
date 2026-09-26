@@ -224,6 +224,7 @@ fn load_trust(path: &Path) -> Result<TrustFile> {
     Ok(file)
 }
 impl LanService {
+    #[cfg(test)]
     fn open(dir: &Path) -> Result<Arc<Self>> {
         Self::open_with_repository(dir, None, None)
     }

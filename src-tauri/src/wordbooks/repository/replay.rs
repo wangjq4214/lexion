@@ -26,17 +26,28 @@ pub struct Envelope {
     pub occurred_at: Option<i64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum ReplayError {
+    #[error("database error: {0}")]
     Database(rusqlite::Error),
+    #[error("invalid replay operation: {0}")]
     Invalid(&'static str),
+    #[error("conflicting change: {0:?}")]
     Conflict(ChangeId),
+    #[error("business conflict")]
     BusinessConflict,
+    #[error("legacy baseline")]
     LegacyBaseline,
+    #[error("sequence exhausted")]
     SequenceExhausted,
+    #[error("cyclic dependencies")]
     Cycle,
+    #[cfg(test)]
+    #[error("projection error: {0}")]
     Projection(String),
+    #[error("unauthorized origin")]
     UnauthorizedOrigin,
+    #[error("unshareable dependency: {0:?}")]
     UnshareableDependency(ChangeId),
 }
 impl From<rusqlite::Error> for ReplayError {
@@ -515,6 +526,7 @@ impl WordbookRepository {
     /// A cursor is a per-origin *contiguous* watermark, not a global arrival index.
     /// Only applied operations are exported; missing predecessors never leak as complete.
     /// Internal unrestricted export for replay tests; network export uses `exchange_batch`.
+    #[cfg(test)]
     pub(crate) fn changes_since(
         &self,
         cursors: &BTreeMap<DeviceId, u64>,
@@ -633,11 +645,11 @@ impl WordbookRepository {
         enabled(&tx)?;
         let changes = load(&tx)?;
         let mut output = Vec::new();
-        let mut next = after.checked_add(1).ok_or(ReplayError::SequenceExhausted)?;
-        for change in changes
-            .values()
-            .filter(|change| change.id.device == local && change.id.sequence > after)
-        {
+        for (next, change) in (after.checked_add(1).ok_or(ReplayError::SequenceExhausted)?..).zip(
+            changes
+                .values()
+                .filter(|change| change.id.device == local && change.id.sequence > after),
+        ) {
             if output.len() == limit {
                 break;
             }
@@ -660,7 +672,6 @@ impl WordbookRepository {
                 return Err(ReplayError::UnshareableDependency(dependency.clone()));
             }
             output.push(change.clone());
-            next += 1;
         }
         Ok(output)
     }

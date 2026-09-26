@@ -68,6 +68,8 @@ struct Candidate {
     direction: &'static str,
 }
 
+type PendingReviewOrigin = (Option<String>, Option<i64>, Option<i64>, bool);
+
 impl WordbookRepository {
     pub fn review_target(&self) -> Result<f64, RepositoryError> {
         let connection = self.connect()?;
@@ -149,15 +151,7 @@ impl WordbookRepository {
             _ => return Err(RepositoryError::Validation("无效的练习来源或单词本")),
         };
         if self.sync_enabled()? {
-            return self.schedule_sync_at(
-                source,
-                source_id,
-                table,
-                limit,
-                mode,
-                now,
-                &mixed_direction,
-            );
+            return self.schedule_sync_at(source, source_id, limit, mode, now, &mixed_direction);
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
@@ -274,13 +268,19 @@ impl WordbookRepository {
         &self,
         source: &str,
         source_id: i64,
-        table: &str,
         limit: u8,
         mode: &str,
         now: f64,
         mixed_direction: &impl Fn(&str, &str) -> bool,
     ) -> Result<Vec<ScheduledQuestion>, RepositoryError> {
         use super::learning::{LearningChange, Selection};
+        // `source` was validated by schedule_at before calling this method.
+        let table = match source {
+            "wordbook" => "entries",
+            "favorites" => "favorites",
+            "mistakes" => "mistakes",
+            _ => unreachable!("validated practice source"),
+        };
         let chosen = std::cell::RefCell::new(Vec::<(WordEntry, String)>::new());
         let envelope = self.append_local_build(Some((now * 1000.0) as i64), &super::SyncProjection, |tx| {
             tx.execute("INSERT OR IGNORE INTO sync_retired_reviews SELECT origin_device,origin_sequence,origin_index
@@ -381,7 +381,7 @@ impl WordbookRepository {
         }
         if self.sync_enabled()? {
             let connection = self.connect()?;
-            let origin: Option<(Option<String>, Option<i64>, Option<i64>, bool)> = connection.query_row(
+            let origin: Option<PendingReviewOrigin> = connection.query_row(
                 "SELECT origin_device,origin_sequence,origin_index,completed FROM pending_reviews WHERE id=?1",
                 [review_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
             let Some((device, sequence, index, completed)) = origin else {
