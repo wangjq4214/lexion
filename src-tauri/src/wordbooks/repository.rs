@@ -6,7 +6,59 @@ use super::model::{ExamQuestion, ImportedEntry, MistakeEntry, WordEntry, Wordboo
 
 #[path = "repository/content.rs"]
 mod content;
+mod learning;
 pub(crate) mod replay;
+
+/// Composite projection used by every production append and network ingress.
+pub(crate) struct SyncProjection;
+impl replay::Projection for SyncProjection {
+    fn validate(&self, change: &replay::Envelope) -> Result<(), replay::ReplayError> {
+        if is_learning(change) {
+            replay::Projection::validate(&learning::LearningProjection, change)
+        } else {
+            replay::Projection::validate(&content::ContentProjection, change)
+        }
+    }
+    fn reset(&self, tx: &Transaction<'_>) -> Result<(), replay::ReplayError> {
+        replay::Projection::reset(&learning::LearningProjection, tx)?;
+        replay::Projection::reset(&content::ContentProjection, tx)
+    }
+    fn apply(
+        &self,
+        tx: &Transaction<'_>,
+        change: &replay::Envelope,
+    ) -> Result<(), replay::ReplayError> {
+        if is_learning(change) {
+            replay::Projection::apply(&learning::LearningProjection, tx, change)
+        } else {
+            replay::Projection::apply(&content::ContentProjection, tx, change)
+        }
+    }
+    fn finish_rebuild(
+        &self,
+        tx: &Transaction<'_>,
+        changes: &[replay::Envelope],
+    ) -> Result<(), replay::ReplayError> {
+        let content: Vec<_> = changes
+            .iter()
+            .filter(|change| !is_learning(change))
+            .cloned()
+            .collect();
+        replay::Projection::finish_rebuild(&content::ContentProjection, tx, &content)
+    }
+}
+
+fn is_learning(change: &replay::Envelope) -> bool {
+    serde_json::from_slice::<serde_json::Value>(&change.content)
+        .ok()
+        .and_then(|v| v.get("type")?.as_str().map(str::to_owned))
+        .is_some_and(|kind| {
+            matches!(
+                kind.as_str(),
+                "mistake" | "schedule" | "complete" | "target"
+            )
+        })
+}
 #[path = "schedule.rs"]
 mod schedule;
 
@@ -54,7 +106,7 @@ impl WordbookRepository {
     }
 
     fn record_content(&self, change: content::ContentChange) -> Result<(), RepositoryError> {
-        self.append_local(change.encode(), None, &content::ContentProjection)
+        self.append_local(change.encode(), None, &SyncProjection)
             .map_err(RepositoryError::Replay)?;
         Ok(())
     }
@@ -167,6 +219,43 @@ impl WordbookRepository {
         transaction.execute_batch(
             "CREATE INDEX IF NOT EXISTS pending_reviews_created_at ON pending_reviews(created_at);",
         )?;
+        transaction.execute_batch("CREATE TABLE IF NOT EXISTS sync_submissions (
+            device TEXT NOT NULL, token TEXT NOT NULL, normalized_english TEXT NOT NULL, chinese TEXT NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(device,token));
+            CREATE TABLE IF NOT EXISTS sync_completions (
+            device TEXT NOT NULL, sequence INTEGER NOT NULL, item_index INTEGER NOT NULL,
+            PRIMARY KEY(device,sequence,item_index));
+            CREATE TABLE IF NOT EXISTS sync_retired_reviews (
+            device TEXT NOT NULL, sequence INTEGER NOT NULL, item_index INTEGER NOT NULL,
+            PRIMARY KEY(device,sequence,item_index));")?;
+        let has_sync_created_at: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sync_submissions') WHERE name='created_at')",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_sync_created_at {
+            transaction.execute_batch(
+                "ALTER TABLE sync_submissions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
+        for (column, definition) in [
+            ("origin_device", "TEXT"),
+            ("origin_sequence", "INTEGER"),
+            ("origin_index", "INTEGER"),
+        ] {
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('pending_reviews') WHERE name=?1)",
+                [column],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                transaction.execute_batch(&format!(
+                    "ALTER TABLE pending_reviews ADD COLUMN {column} {definition};"
+                ))?;
+            }
+        }
+        transaction.execute_batch("CREATE UNIQUE INDEX IF NOT EXISTS pending_origin ON pending_reviews(origin_device,origin_sequence,origin_index);")?;
         replay::initialize(&transaction, legacy)?;
         transaction.commit()?;
         Ok(())
@@ -236,7 +325,7 @@ impl WordbookRepository {
                     })
                     .collect(),
             };
-            self.append_local_checked(change.encode(), None, &content::ContentProjection, |tx| {
+            self.append_local_checked(change.encode(), None, &SyncProjection, |tx| {
                 if !replace_existing
                     && tx.query_row(
                         "SELECT EXISTS(SELECT 1 FROM wordbooks WHERE name=?1)",
@@ -487,6 +576,25 @@ impl WordbookRepository {
         chinese: &str,
     ) -> Result<MistakeEntry, RepositoryError> {
         let (english, chinese) = favorite_pair(english, chinese)?;
+        if self.sync_enabled()? {
+            self.append_local(
+                learning::LearningChange::Mistake {
+                    english: english.to_owned(),
+                    chinese: chinese.to_owned(),
+                    submission: None,
+                }
+                .encode(),
+                Some(rusqlite::Connection::open(&self.database_path)?.query_row(
+                    "SELECT unixepoch()",
+                    [],
+                    |r| r.get(0),
+                )?),
+                &SyncProjection,
+            )
+            .map_err(RepositoryError::Replay)?;
+            return Ok(self.connect()?.query_row("SELECT id,english,chinese,error_count FROM mistakes WHERE normalized_english=?1 AND chinese=?2",
+                params![english.to_lowercase(),chinese], mistake_entry)?);
+        }
         let connection = self.connect()?;
         // A single UPSERT avoids losing increments when two submissions use separate connections.
         Ok(connection.query_row(
@@ -511,6 +619,43 @@ impl WordbookRepository {
             return Err(RepositoryError::Validation("提交 ID 不能为空"));
         }
         let normalized_english = english.to_lowercase();
+        if self.sync_enabled()? {
+            let device = self.replay_device_id().map_err(RepositoryError::Replay)?;
+            let normalized = normalized_english.clone();
+            let token = submission_id.to_owned();
+            let change = learning::LearningChange::Mistake {
+                english: english.to_owned(),
+                chinese: chinese.to_owned(),
+                submission: Some(token.clone()),
+            };
+            let occurred_at: i64 = self
+                .connect()?
+                .query_row("SELECT unixepoch()", [], |r| r.get(0))?;
+            match self.append_local_build(Some(occurred_at), &SyncProjection, |tx| {
+                tx.execute("DELETE FROM mistake_submissions WHERE created_at < unixepoch()-2592000 AND submission_id NOT LIKE 'exam:%'", [])?;
+                let previous: Option<(String, String, i64)> = tx.query_row(
+                    "SELECT normalized_english,chinese,created_at FROM sync_submissions WHERE device=?1 AND token=?2",
+                    params![device.0, token],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                ).optional()?;
+                if let Some((old_english, old_chinese, old_time)) = previous {
+                    if token.starts_with("exam:") || occurred_at.saturating_sub(old_time) <= 2_592_000 {
+                        if (old_english, old_chinese) != (normalized.clone(), chinese.to_owned()) {
+                            return Err(replay::ReplayError::BusinessConflict);
+                        }
+                        // A retry must not allocate another event.
+                        return Err(replay::ReplayError::Invalid("already submitted"));
+                    }
+                }
+                Ok(change.encode())
+            }) {
+                Ok(_) | Err(replay::ReplayError::Invalid("already submitted")) => {},
+                Err(replay::ReplayError::BusinessConflict) => return Err(RepositoryError::Conflict),
+                Err(other) => return Err(RepositoryError::Replay(other)),
+            }
+            return Ok(self.connect()?.query_row("SELECT id,english,chinese,error_count FROM mistakes WHERE normalized_english=?1 AND chinese=?2",
+                params![normalized_english,chinese], mistake_entry)?);
+        }
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         // Practice retry tokens expire after 30 days. Exam tokens must remain claimed:

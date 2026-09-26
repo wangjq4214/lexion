@@ -183,6 +183,7 @@ pub(super) fn has_legacy_data(tx: &Transaction<'_>) -> rusqlite::Result<bool> {
         "entries",
         "favorites",
         "mistakes",
+        "pending_reviews",
         "review_memory",
         "review_coverage",
     ] {
@@ -413,9 +414,21 @@ impl WordbookRepository {
         projection: &impl Projection,
         check: impl FnOnce(&Transaction<'_>) -> Result<(), ReplayError>,
     ) -> Result<Envelope, ReplayError> {
+        self.append_local_build(occurred_at, projection, |tx| {
+            check(tx)?;
+            Ok(content)
+        })
+    }
+
+    pub(crate) fn append_local_build(
+        &self,
+        occurred_at: Option<i64>,
+        projection: &impl Projection,
+        build: impl FnOnce(&Transaction<'_>) -> Result<Vec<u8>, ReplayError>,
+    ) -> Result<Envelope, ReplayError> {
         let mut conn = self.connect()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        check(&tx)?;
+        let content = build(&tx)?;
         let (device, next) = enabled(&tx)?;
         if next >= i64::MAX as u64 {
             return Err(ReplayError::SequenceExhausted);

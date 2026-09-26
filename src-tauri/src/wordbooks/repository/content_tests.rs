@@ -1,4 +1,4 @@
-use super::{content::ContentProjection, replay::Envelope, ImportedEntry, WordbookRepository};
+use super::{replay::Envelope, ImportedEntry, SyncProjection, WordbookRepository};
 use std::collections::BTreeMap;
 use tempfile::tempdir;
 
@@ -40,7 +40,7 @@ fn snapshot(
 
 fn exchange(from: &WordbookRepository, to: &WordbookRepository) {
     for change in from.changes_since(&BTreeMap::new(), 100).unwrap() {
-        to.ingest(&change, &ContentProjection).unwrap();
+        to.ingest(&change, &SyncProjection).unwrap();
     }
 }
 
@@ -117,10 +117,10 @@ fn concurrent_replacement_and_deletion_use_pair_not_remote_row_id() {
     let from_a: Vec<Envelope> = a.changes_since(&BTreeMap::new(), 100).unwrap();
     let from_b: Vec<Envelope> = b.changes_since(&BTreeMap::new(), 100).unwrap();
     for change in from_b.iter().rev() {
-        a.ingest(change, &ContentProjection).unwrap();
+        a.ingest(change, &SyncProjection).unwrap();
     }
     for change in from_a.iter().rev() {
-        b.ingest(change, &ContentProjection).unwrap();
+        b.ingest(change, &SyncProjection).unwrap();
     }
     assert_eq!(snapshot(&a), snapshot(&b));
     assert_eq!(
@@ -133,7 +133,7 @@ fn concurrent_replacement_and_deletion_use_pair_not_remote_row_id() {
     );
     let before = snapshot(&b);
     for change in &from_a {
-        b.ingest(change, &ContentProjection).unwrap();
+        b.ingest(change, &SyncProjection).unwrap();
     }
     assert_eq!(snapshot(&b), before);
 }

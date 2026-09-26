@@ -2,7 +2,7 @@
 
 **Ticket ID:** T0003
 **Source:** [Spec 0004](../../spec/0004-offline-lan-learning-data-sync.md) §Requirement 1–3；[ADR 0003](../../adr/0003-preserve-mistake-records-independent-of-wordbooks.md)、[ADR 0004](../../adr/0004-schedule-practice-with-coverage-and-due-review.md)、[ADR 0006](../../adr/0006-keep-exam-scoring-separate-from-practice-review.md)、[ADR 0009](../../adr/0009-support-offline-multi-device-lan-sync.md)
-**Status:** Todo
+**Status:** Done
 
 ## Goal
 

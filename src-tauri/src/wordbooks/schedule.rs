@@ -9,18 +9,18 @@ use crate::wordbooks::model::{ScheduledQuestion, WordEntry};
 // A review can be retried after an ambiguous response, but abandoned round tokens need not live forever.
 const REVIEW_TOKEN_RETENTION_SECONDS: f64 = 30.0 * 24.0 * 60.0 * 60.0;
 #[derive(Clone, Copy)]
-struct Curve {
-    target: f64,
-    initial_stability: f64,
-    success_growth: f64,
-    error_weight: f64,
-    hint_weight: f64,
-    skip_factor: f64,
-    minimum_stability: f64,
-    maximum_stability: f64,
+pub(super) struct Curve {
+    pub(super) target: f64,
+    pub(super) initial_stability: f64,
+    pub(super) success_growth: f64,
+    pub(super) error_weight: f64,
+    pub(super) hint_weight: f64,
+    pub(super) skip_factor: f64,
+    pub(super) minimum_stability: f64,
+    pub(super) maximum_stability: f64,
 }
 
-const CURVE: Curve = Curve {
+pub(super) const CURVE: Curve = Curve {
     target: 0.9,
     initial_stability: 864_000.0,
     success_growth: 1.6,
@@ -32,7 +32,7 @@ const CURVE: Curve = Curve {
 };
 
 impl Curve {
-    fn interval(self, stability: f64) -> f64 {
+    pub(super) fn interval(self, stability: f64) -> f64 {
         -stability * self.target.ln()
     }
 
@@ -41,7 +41,7 @@ impl Curve {
         (-elapsed.max(0.0) / stability).exp()
     }
 
-    fn updated(self, previous: f64, errors: u32, hints: u8, skipped: bool) -> f64 {
+    pub(super) fn updated(self, previous: f64, errors: u32, hints: u8, skipped: bool) -> f64 {
         let difficulty =
             1.0 + self.error_weight * f64::from(errors) + self.hint_weight * f64::from(hints);
         let multiplier = if skipped {
@@ -81,6 +81,15 @@ impl WordbookRepository {
     pub fn set_review_target(&self, target: f64) -> Result<(), RepositoryError> {
         if !target.is_finite() || !(0.0..1.0).contains(&target) || target == 0.0 {
             return Err(RepositoryError::Validation("目标保持率必须在 0 和 1 之间"));
+        }
+        if self.sync_enabled()? {
+            self.append_local(
+                super::learning::LearningChange::Target { value: target }.encode(),
+                Some(now_seconds() as i64),
+                &super::SyncProjection,
+            )
+            .map_err(RepositoryError::Replay)?;
+            return Ok(());
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
@@ -139,6 +148,17 @@ impl WordbookRepository {
             "mistakes" if wordbook_id.is_none() => ("mistakes", 0),
             _ => return Err(RepositoryError::Validation("无效的练习来源或单词本")),
         };
+        if self.sync_enabled()? {
+            return self.schedule_sync_at(
+                source,
+                source_id,
+                table,
+                limit,
+                mode,
+                now,
+                &mixed_direction,
+            );
+        }
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
         transaction.execute(
@@ -250,6 +270,93 @@ impl WordbookRepository {
         transaction.commit()?;
         Ok(result)
     }
+    fn schedule_sync_at(
+        &self,
+        source: &str,
+        source_id: i64,
+        table: &str,
+        limit: u8,
+        mode: &str,
+        now: f64,
+        mixed_direction: &impl Fn(&str, &str) -> bool,
+    ) -> Result<Vec<ScheduledQuestion>, RepositoryError> {
+        use super::learning::{LearningChange, Selection};
+        let chosen = std::cell::RefCell::new(Vec::<(WordEntry, String)>::new());
+        let envelope = self.append_local_build(Some((now * 1000.0) as i64), &super::SyncProjection, |tx| {
+            tx.execute("INSERT OR IGNORE INTO sync_retired_reviews SELECT origin_device,origin_sequence,origin_index
+                FROM pending_reviews WHERE origin_device IS NOT NULL AND created_at < ?1",
+                [now - REVIEW_TOKEN_RETENTION_SECONDS])?;
+            tx.execute("DELETE FROM pending_reviews WHERE created_at < ?1", [now - REVIEW_TOKEN_RETENTION_SECONDS])?;
+            let book: Option<String> = if source == "wordbook" {
+                Some(tx.query_row("SELECT name FROM wordbooks WHERE id=?1", [source_id], |r| r.get(0))
+                    .map_err(|_| super::replay::ReplayError::Invalid("单词本不存在"))?)
+            } else { None };
+            let sql = format!("SELECT e.id,e.english,e.chinese,e.normalized_english,
+                c.source IS NOT NULL,zh.due_at,en.due_at FROM {table} e
+                LEFT JOIN review_coverage c ON c.source=?1 AND c.source_id=?2
+                  AND c.normalized_english=e.normalized_english AND c.chinese=e.chinese
+                LEFT JOIN review_memory zh ON zh.normalized_english=e.normalized_english
+                  AND zh.chinese=e.chinese AND zh.direction='zh-to-en'
+                LEFT JOIN review_memory en ON en.normalized_english=e.normalized_english
+                  AND en.chinese=e.chinese AND en.direction='en-to-zh'
+                {} ORDER BY e.id", if source == "wordbook" { "WHERE e.wordbook_id=?2" } else { "" });
+            let mut candidates: Vec<Candidate> = tx.prepare(&sql)?.query_map(params![source,source_id], |row| {
+                let normalized: String = row.get(3)?;
+                let chinese: String = row.get(2)?;
+                let direction = match mode {
+                    "mixed" if mixed_direction(&normalized, &chinese) => "en-to-zh",
+                    "en-to-zh" => "en-to-zh",
+                    _ => "zh-to-en",
+                };
+                Ok(Candidate {
+                    entry: WordEntry { id: row.get(0)?, english: row.get(1)?, chinese },
+                    normalized, covered: row.get(4)?,
+                    due_at: row.get(if direction == "zh-to-en" { 5 } else { 6 })?, direction,
+                })
+            })?.collect::<Result<_, _>>()?;
+            let mut unseen = Vec::new();
+            let mut due = Vec::new();
+            let mut other = Vec::new();
+            for candidate in candidates.drain(..) {
+                if !candidate.covered { unseen.push(candidate); }
+                else if candidate.due_at.is_some_and(|time| time <= now) { due.push(candidate); }
+                else { other.push(candidate); }
+            }
+            due.sort_by(|a,b| a.due_at.unwrap().total_cmp(&b.due_at.unwrap())
+                .then(a.entry.id.cmp(&b.entry.id)));
+            let capacity = usize::from(limit);
+            let reserve = usize::from(!unseen.is_empty());
+            let mut selected = Vec::with_capacity(capacity);
+            selected.extend(due.drain(..due.len().min(capacity-reserve)));
+            selected.extend(unseen.drain(..unseen.len().min(capacity-selected.len())));
+            selected.extend(due.drain(..due.len().min(capacity-selected.len())));
+            selected.extend(other.drain(..other.len().min(capacity-selected.len())));
+            let payload = LearningChange::Schedule { source: source.to_owned(), book,
+                selected: selected.iter().map(|item| Selection {
+                    english: item.normalized.clone(), chinese: item.entry.chinese.clone(),
+                    direction: item.direction.to_owned(),
+                }).collect() };
+            *chosen.borrow_mut() = selected.into_iter().map(|item| (item.entry, item.direction.to_owned())).collect();
+            Ok(payload.encode())
+        }).map_err(|error| match error {
+            super::replay::ReplayError::Invalid("单词本不存在") => RepositoryError::Validation("单词本不存在"),
+            other => RepositoryError::Replay(other),
+        })?;
+        let connection = self.connect()?;
+        let mut result = Vec::new();
+        for (index, (entry, direction)) in chosen.into_inner().into_iter().enumerate() {
+            let review_id = connection.query_row(
+                "SELECT id FROM pending_reviews WHERE origin_device=?1 AND origin_sequence=?2 AND origin_index=?3",
+                params![envelope.id.device.0,envelope.id.sequence as i64,index as i64],
+                |r| r.get(0))?;
+            result.push(ScheduledQuestion {
+                review_id,
+                entry,
+                direction,
+            });
+        }
+        Ok(result)
+    }
 
     pub fn complete_review(
         &self,
@@ -271,6 +378,51 @@ impl WordbookRepository {
     ) -> Result<(), RepositoryError> {
         if review_id <= 0 || hint_count > 3 || !now.is_finite() || now < 0.0 {
             return Err(RepositoryError::Validation("无效的复习结果"));
+        }
+        if self.sync_enabled()? {
+            let connection = self.connect()?;
+            let origin: Option<(Option<String>, Option<i64>, Option<i64>, bool)> = connection.query_row(
+                "SELECT origin_device,origin_sequence,origin_index,completed FROM pending_reviews WHERE id=?1",
+                [review_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).optional()?;
+            let Some((device, sequence, index, completed)) = origin else {
+                return Err(RepositoryError::Validation("复习记录不存在"));
+            };
+            if completed {
+                return Ok(());
+            }
+            let (Some(device), Some(sequence), Some(index)) = (device, sequence, index) else {
+                return Err(RepositoryError::Validation("复习记录不存在"));
+            };
+            let change = super::learning::LearningChange::Complete {
+                schedule: super::replay::ChangeId {
+                    device: super::replay::DeviceId(device),
+                    sequence: sequence as u64,
+                },
+                index: index as usize,
+                errors: error_count,
+                hints: hint_count,
+                skipped,
+            };
+            match self.append_local_checked(
+                change.encode(),
+                Some((now * 1000.0) as i64),
+                &super::SyncProjection,
+                |tx| {
+                    let completed: bool = tx.query_row(
+                        "SELECT completed FROM pending_reviews WHERE id=?1",
+                        [review_id],
+                        |r| r.get(0),
+                    )?;
+                    if completed {
+                        return Err(super::replay::ReplayError::BusinessConflict);
+                    }
+                    Ok(())
+                },
+            ) {
+                Ok(_) | Err(super::replay::ReplayError::BusinessConflict) => {}
+                Err(other) => return Err(RepositoryError::Replay(other)),
+            }
+            return Ok(());
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
@@ -345,6 +497,332 @@ mod tests {
             params![english.to_lowercase(), chinese, direction],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional().unwrap()
+    }
+
+    #[test]
+    fn unfinished_local_token_survives_remote_rebuild_without_peer_token_collision() {
+        use std::collections::BTreeMap;
+        let dir = tempdir().unwrap();
+        let a = WordbookRepository::open(dir.path().join("a")).unwrap();
+        let b = WordbookRepository::open(dir.path().join("b")).unwrap();
+        a.add_favorite("apple", "苹果").unwrap();
+        b.add_favorite("pear", "梨").unwrap();
+        let token = a
+            .schedule_at("favorites", None, 1, "zh-to-en", 100.0, |_, _| false)
+            .unwrap()[0]
+            .review_id;
+        let peer = b
+            .schedule_at("favorites", None, 1, "zh-to-en", 90.0, |_, _| false)
+            .unwrap()[0]
+            .review_id;
+        for event in b.changes_since(&BTreeMap::new(), 100).unwrap().iter().rev() {
+            a.ingest(event, &super::super::SyncProjection).unwrap();
+        }
+        assert!(a
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT completed=0 FROM pending_reviews WHERE id=?1",
+                [token],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap());
+        a.complete_at(token, 0, 0, false, 110.0).unwrap();
+        assert!(memory(&a, "apple", "苹果", "zh-to-en").is_some());
+        assert!(memory(&a, "pear", "梨", "zh-to-en").is_none());
+        // Numeric review IDs on peers are not wire identities.
+        assert_eq!(token, peer);
+    }
+    #[test]
+    fn ingress_rejects_foreign_completion_and_non_normalized_schedule() {
+        use super::super::learning::{LearningChange, Selection};
+        use super::super::replay::{ChangeId, DeviceId, Envelope};
+        let dir = tempdir().unwrap();
+        let a = WordbookRepository::open(dir.path().join("a")).unwrap();
+        a.add_favorite("apple", "苹果").unwrap();
+        let token = a
+            .schedule_at("favorites", None, 1, "zh-to-en", 100.0, |_, _| false)
+            .unwrap()[0]
+            .review_id;
+        let schedule = a
+            .changes_since(&Default::default(), 10)
+            .unwrap()
+            .pop()
+            .unwrap();
+        let peer = DeviceId("f".repeat(32));
+        let forged = |content: Vec<u8>| Envelope {
+            id: ChangeId {
+                device: peer.clone(),
+                sequence: 1,
+            },
+            version: 1,
+            content,
+            dependencies: Default::default(),
+            occurred_at: Some(101_000),
+        };
+        let foreign = forged(
+            LearningChange::Complete {
+                schedule: schedule.id,
+                index: 0,
+                errors: 1,
+                hints: 0,
+                skipped: false,
+            }
+            .encode(),
+        );
+        assert!(a.ingest(&foreign, &super::super::SyncProjection).is_err());
+        let malformed = forged(
+            LearningChange::Schedule {
+                source: "favorites".into(),
+                book: None,
+                selected: vec![Selection {
+                    english: "APPLE".into(),
+                    chinese: "苹果".into(),
+                    direction: "zh-to-en".into(),
+                }],
+            }
+            .encode(),
+        );
+        assert!(a.ingest(&malformed, &super::super::SyncProjection).is_err());
+        a.complete_at(token, 0, 0, false, 102.0).unwrap();
+        assert!(memory(&a, "apple", "苹果", "zh-to-en").is_some());
+    }
+
+    #[test]
+    fn practice_submission_identity_expires_after_thirty_days_but_exam_does_not() {
+        use super::super::learning::LearningChange;
+        let dir = tempdir().unwrap();
+        let repo = WordbookRepository::open(dir.path().join("db")).unwrap();
+        for token in ["practice:reused", "exam:fixed"] {
+            repo.append_local(
+                LearningChange::Mistake {
+                    english: "apple".into(),
+                    chinese: "苹果".into(),
+                    submission: Some(token.into()),
+                }
+                .encode(),
+                Some(1),
+                &super::super::SyncProjection,
+            )
+            .unwrap();
+        }
+        repo.record_mistake_once("apple", "水果", "practice:reused")
+            .unwrap();
+        assert!(matches!(
+            repo.record_mistake_once("apple", "水果", "exam:fixed"),
+            Err(RepositoryError::Conflict)
+        ));
+        assert_eq!(repo.list_mistakes().unwrap().len(), 2);
+        let count: i64 = repo
+            .connect()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM replay_changes WHERE applied=1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 3);
+        // Rebuild from canonical history must retain both distinct practice submissions.
+        let other = WordbookRepository::open(dir.path().join("peer")).unwrap();
+        for change in repo.changes_since(&Default::default(), 10).unwrap() {
+            other
+                .ingest(&change, &super::super::SyncProjection)
+                .unwrap();
+        }
+        assert_eq!(
+            other.list_mistakes().unwrap(),
+            repo.list_mistakes().unwrap()
+        );
+    }
+
+    #[test]
+    fn two_sources_two_meanings_exam_and_skip_converge() {
+        use std::collections::BTreeMap;
+        let dir = tempdir().unwrap();
+        let a = WordbookRepository::open(dir.path().join("a")).unwrap();
+        let b = WordbookRepository::open(dir.path().join("b")).unwrap();
+        let original = a.replace("book", &[], false).unwrap();
+        // Reimporting keeps the content identity while resetting only this source's coverage.
+        let book = a
+            .replace(
+                "book",
+                &[
+                    ImportedEntry {
+                        english: "Apple".into(),
+                        chinese: "苹果".into(),
+                    },
+                    ImportedEntry {
+                        english: "Apple".into(),
+                        chinese: "水果".into(),
+                    },
+                ],
+                true,
+            )
+            .unwrap();
+        assert_eq!(book.id, original.id);
+        b.add_favorite("apple", "苹果").unwrap();
+        b.add_favorite("apple", "水果").unwrap();
+        b.schedule_at("favorites", None, 1, "en-to-zh", 99.0, |_, _| false)
+            .unwrap();
+        let questions = a
+            .schedule_at("wordbook", Some(book.id), 2, "zh-to-en", 100.0, |_, _| {
+                false
+            })
+            .unwrap();
+        let skipped = questions
+            .iter()
+            .find(|q| q.entry.chinese == "苹果")
+            .unwrap();
+        a.complete_at(skipped.review_id, 0, 0, true, 101.0).unwrap();
+        a.record_mistake_once("Apple", "水果", "exam:blank")
+            .unwrap();
+        b.record_mistake_once("apple", "苹果", "exam:wrong")
+            .unwrap();
+        let from_a = a.changes_since(&BTreeMap::new(), 100).unwrap();
+        let from_b = b.changes_since(&BTreeMap::new(), 100).unwrap();
+        for change in from_b.iter().rev() {
+            a.ingest(change, &super::super::SyncProjection).unwrap();
+        }
+        for change in from_a.iter().rev() {
+            b.ingest(change, &super::super::SyncProjection).unwrap();
+        }
+        let coverage = |repo: &WordbookRepository| -> Vec<(String, i64, String, String)> {
+            let connection = repo.connect().unwrap();
+            let mut statement = connection.prepare("SELECT source,source_id,normalized_english,chinese FROM review_coverage ORDER BY source,source_id,normalized_english,chinese").unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(coverage(&a), coverage(&b));
+        assert_eq!(coverage(&a).len(), 3);
+        assert_eq!(
+            coverage(&a)
+                .iter()
+                .filter(|row| row.0 == "wordbook")
+                .count(),
+            2
+        );
+        assert_eq!(
+            coverage(&a)
+                .iter()
+                .filter(|row| row.0 == "favorites")
+                .count(),
+            1
+        );
+        assert_eq!(a.list_mistakes().unwrap(), b.list_mistakes().unwrap());
+        assert_eq!(a.list_mistakes().unwrap().len(), 2);
+        assert!(memory(&a, "apple", "苹果", "zh-to-en").is_some());
+        assert_eq!(
+            memory(&a, "apple", "苹果", "zh-to-en"),
+            memory(&b, "apple", "苹果", "zh-to-en")
+        );
+        assert!(memory(&a, "apple", "水果", "zh-to-en").is_none());
+        assert!(memory(&a, "apple", "苹果", "en-to-zh").is_none());
+        assert_eq!(a.list_mistakes().unwrap()[0].error_count, 1);
+    }
+
+    #[test]
+    fn pending_only_legacy_database_keeps_local_completion_path() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy");
+        rusqlite::Connection::open(&path).unwrap().execute_batch(
+            "CREATE TABLE pending_reviews (id INTEGER PRIMARY KEY, normalized_english TEXT NOT NULL, chinese TEXT NOT NULL, direction TEXT NOT NULL, completed INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO pending_reviews VALUES (42, 'apple', '苹果', 'zh-to-en', 0);",
+        ).unwrap();
+        let repo = WordbookRepository::open(path).unwrap();
+        assert!(!repo.sync_enabled().unwrap());
+        repo.complete_at(42, 0, 0, false, 100.0).unwrap();
+        assert!(memory(&repo, "apple", "苹果", "zh-to-en").is_some());
+    }
+
+    #[test]
+    fn learning_exchange_reorders_and_preserves_local_review_tokens() {
+        use std::collections::BTreeMap;
+        let dir = tempdir().unwrap();
+        let a_path = dir.path().join("a.sqlite");
+        let b_path = dir.path().join("b.sqlite");
+        let a = WordbookRepository::open(&a_path).unwrap();
+        let b = WordbookRepository::open(&b_path).unwrap();
+        let book = a
+            .replace(
+                "book",
+                &[ImportedEntry {
+                    english: "Apple".into(),
+                    chinese: "苹果".into(),
+                }],
+                false,
+            )
+            .unwrap();
+        b.add_favorite("apple", "苹果").unwrap();
+        a.record_mistake_once("Apple", "苹果", "same-token")
+            .unwrap();
+        b.record_mistake_once("apple", "苹果", "same-token")
+            .unwrap();
+        let a_token = a
+            .schedule_at("wordbook", Some(book.id), 1, "zh-to-en", 100.0, |_, _| {
+                false
+            })
+            .unwrap()[0]
+            .review_id;
+        let b_token = b
+            .schedule_at("favorites", None, 1, "en-to-zh", 90.0, |_, _| false)
+            .unwrap()[0]
+            .review_id;
+        a.complete_at(a_token, 0, 0, false, 100.0).unwrap();
+        b.complete_at(b_token, 1, 0, false, 90.0).unwrap();
+        a.set_review_target(0.8).unwrap();
+        b.set_review_target(0.7).unwrap();
+        let a_changes = a.changes_since(&BTreeMap::new(), 100).unwrap();
+        let b_changes = b.changes_since(&BTreeMap::new(), 100).unwrap();
+        for change in b_changes.iter().rev() {
+            a.ingest(change, &super::super::SyncProjection).unwrap();
+        }
+        for change in a_changes.iter().rev() {
+            b.ingest(change, &super::super::SyncProjection).unwrap();
+        }
+        for change in &a_changes {
+            b.ingest(change, &super::super::SyncProjection).unwrap();
+        }
+        for change in &b_changes {
+            a.ingest(change, &super::super::SyncProjection).unwrap();
+        }
+        assert_eq!(a.list_mistakes().unwrap()[0].error_count, 2);
+        assert_eq!(b.list_mistakes().unwrap()[0].error_count, 2);
+        assert_eq!(a.review_target().unwrap(), b.review_target().unwrap());
+        assert_eq!(
+            memory(&a, "apple", "苹果", "zh-to-en"),
+            memory(&b, "apple", "苹果", "zh-to-en")
+        );
+        assert_eq!(
+            memory(&a, "apple", "苹果", "en-to-zh"),
+            memory(&b, "apple", "苹果", "en-to-zh")
+        );
+        assert_eq!(
+            a.record_mistake_once("APPLE", "苹果", "same-token")
+                .unwrap()
+                .error_count,
+            2
+        );
+        assert!(matches!(
+            a.record_mistake_once("Apple", "水果", "same-token"),
+            Err(RepositoryError::Conflict)
+        ));
+        assert_eq!(a.list_mistakes().unwrap()[0].error_count, 2);
+        a.complete_at(a_token, 2, 3, true, 200.0).unwrap();
+        b.complete_at(b_token, 2, 3, true, 200.0).unwrap();
+        assert_eq!(a.list_mistakes().unwrap()[0].error_count, 2);
+        let a = WordbookRepository::open(a_path).unwrap();
+        let b = WordbookRepository::open(b_path).unwrap();
+        assert_eq!(a.review_target().unwrap(), b.review_target().unwrap());
+        assert_eq!(
+            memory(&a, "apple", "苹果", "zh-to-en"),
+            memory(&b, "apple", "苹果", "zh-to-en")
+        );
     }
 
     #[test]
