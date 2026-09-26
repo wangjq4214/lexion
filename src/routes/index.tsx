@@ -61,6 +61,12 @@ function HomePage() {
             size="sm"
             onClick={() => void navigate({ to: "/wordbooks" })}
           />
+          <Button
+            label="局域网设备配对"
+            variant="ghost"
+            size="sm"
+            onClick={() => void navigate({ to: "/devices" })}
+          />
         </Stack>
       </Section>
     </Stack>

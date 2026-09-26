@@ -1,3 +1,4 @@
+mod lan;
 mod wordbooks;
 
 use std::fs;
@@ -15,6 +16,7 @@ pub fn run() {
             fs::create_dir_all(&data_directory)?;
             let repository = WordbookRepository::open(data_directory.join("wordbooks.sqlite"))?;
             app.manage(repository);
+            app.manage(lan::LanBackend::open(&data_directory));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -37,7 +39,11 @@ pub fn run() {
             wordbooks::review_target,
             wordbooks::set_review_target,
             wordbooks::schedule_practice,
-            wordbooks::complete_review
+            wordbooks::complete_review,
+            lan::lan_status,
+            lan::lan_pair,
+            lan::lan_confirm,
+            lan::lan_cancel
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

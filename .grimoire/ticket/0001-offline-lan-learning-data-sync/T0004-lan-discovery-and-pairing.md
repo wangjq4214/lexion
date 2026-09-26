@@ -2,7 +2,7 @@
 
 **Ticket ID:** T0004
 **Source:** [Spec 0004](../../spec/0004-offline-lan-learning-data-sync.md) §Requirement 4；[ADR 0010](../../adr/0010-discover-lan-peers-with-mdns-and-display-pairing-code.md)
-**Status:** Todo
+**Status:** In Progress
 
 ## Goal
 

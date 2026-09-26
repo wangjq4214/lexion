@@ -1,6 +1,6 @@
 # Discover LAN Peers with mDNS and Display a Pairing Code
 
-**Status:** Proposed
+**Status:** Implementing
 **Date:** 2026-09-26
 
 ## Context
