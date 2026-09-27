@@ -81,3 +81,9 @@
 - **Relationships:**
   - belongs to practice-round
   - depends on review-schedule
+
+### due-review-display-scope
+- **Definition:** The home screen displays the number of review-due vocabulary words across all wordbooks; practice setup displays the number in the selected wordbook. Favorites and mistakes are excluded from both counts. A word is due if its review time falls on or before the end of the current day (including overdue reviews); words never practiced are excluded. Count each English-and-Chinese pair once, even when both answer directions are due or the pair occurs in multiple wordbooks. The practice-setup count does not vary with the chosen practice mode.
+- **Relationships:**
+  - references wordbook
+  - depends on review-schedule

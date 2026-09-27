@@ -1,3 +1,4 @@
+import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { ClickableCard } from "@astryxdesign/core/ClickableCard";
 import { Grid } from "@astryxdesign/core/Grid";
@@ -6,9 +7,21 @@ import { Section } from "@astryxdesign/core/Section";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { useAtomValue } from "jotai";
+import { useDueWordCount } from "../features/wordbooks/useDueWordCount";
+import { syncedDataVersionAtom, wordbooksAtom } from "../state/appState";
 
 function HomePage() {
   const navigate = useNavigate();
+  const { props } = Route.useRouteContext();
+  const wordbooks = useAtomValue(wordbooksAtom);
+  const syncedVersion = useAtomValue(syncedDataVersionAtom);
+  const due = useDueWordCount(
+    props.wordbookService,
+    null,
+    wordbooks !== null,
+    syncedVersion,
+  );
   return (
     <Stack gap={6}>
       <Section paddingBlockStart={6} paddingBlockEnd={0}>
@@ -17,6 +30,26 @@ function HomePage() {
           <Text color="secondary">选择练习或考试，进入后再设置具体模式。</Text>
         </Stack>
       </Section>
+      {due?.error ? (
+        <Banner status="error" title={`无法获取今日待复习词数：${due.error}`} />
+      ) : due?.count == null ? (
+        <Text role="status">正在查询今日待复习词数…</Text>
+      ) : (
+        <Banner
+          status={due.count > 0 ? "info" : "success"}
+          title={`所有单词本今日待复习 ${due.count} 个词`}
+          description={due.count > 0 ? undefined : "今天暂无到期词"}
+          endContent={
+            due.count > 0 ? (
+              <Button
+                label="去练习"
+                variant="secondary"
+                onClick={() => void navigate({ to: "/practice-setup" })}
+              />
+            ) : undefined
+          }
+        />
+      )}
       <Grid columns={{ minWidth: 240, max: 2, repeat: "fit" }} gap={4}>
         <ClickableCard
           label="练习"

@@ -67,6 +67,7 @@ export class WordbookError extends Error {
 
 export type WordbookService = {
   pickWorkbookFile(): Promise<string | null>;
+  dueWordCount(wordbookId: number | null, tomorrow: number): Promise<number>;
   reviewTarget(): Promise<number>;
   setReviewTarget(target: number): Promise<void>;
   schedulePractice(request: ScheduleRequest): Promise<ScheduledQuestion[]>;
@@ -111,6 +112,13 @@ function commandError(error: unknown): WordbookError {
 }
 
 export const tauriWordbookService: WordbookService = {
+  dueWordCount(wordbookId, tomorrow) {
+    return invoke<number>("due_word_count", { wordbookId, tomorrow }).catch(
+      (error) => {
+        throw commandError(error);
+      },
+    );
+  },
   reviewTarget() {
     return invoke<number>("review_target").catch((error) => {
       throw commandError(error);

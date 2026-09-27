@@ -6,6 +6,7 @@ import { WordbookImportFlow } from "./WordbookImportFlow";
 
 function service(overrides?: Partial<WordbookService>): WordbookService {
   return {
+    dueWordCount: vi.fn(async () => 0),
     reviewTarget: vi.fn(async () => 0.9),
     setReviewTarget: vi.fn(async () => {}),
     sampleExam: vi.fn(async () => []),

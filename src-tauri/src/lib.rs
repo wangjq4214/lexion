@@ -40,6 +40,7 @@ pub fn run() {
             wordbooks::list_mistakes,
             wordbooks::sample_mistakes,
             wordbooks::sample_exam,
+            wordbooks::due_word_count,
             wordbooks::review_target,
             wordbooks::set_review_target,
             wordbooks::schedule_practice,

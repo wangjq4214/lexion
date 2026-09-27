@@ -197,6 +197,16 @@ pub fn set_review_target(
         .set_review_target(target)
         .map_err(map_repository_error)
 }
+#[tauri::command]
+pub fn due_word_count(
+    wordbook_id: Option<i64>,
+    tomorrow: f64,
+    repository: State<'_, WordbookRepository>,
+) -> Result<u64, CommandError> {
+    repository
+        .due_word_count(wordbook_id, tomorrow)
+        .map_err(map_repository_error)
+}
 
 #[tauri::command]
 pub fn sample_exam(

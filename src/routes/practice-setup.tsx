@@ -7,6 +7,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import type { WordbookService, WordbookSummary } from "../data/wordbooks";
 import { PracticeSetup } from "../features/practice/PracticeSetup";
 import { usePracticeStart } from "../features/practice/usePracticeStart";
+import { useDueWordCount } from "../features/wordbooks/useDueWordCount";
 import {
   activeWordbookAtom,
   countSelectionAtom,
@@ -14,6 +15,7 @@ import {
   dispatchRoundAtom,
   practiceSourceAtom,
   roundAtom,
+  syncedDataVersionAtom,
   wordbooksAtom,
 } from "../state/appState";
 
@@ -24,8 +26,15 @@ function PracticeSetupPage() {
   const state = useAtomValue(roundAtom);
   const dispatch = useSetAtom(dispatchRoundAtom);
   const wordbooks = useAtomValue(wordbooksAtom);
+  const syncedVersion = useAtomValue(syncedDataVersionAtom);
   const [activeWordbookId, setActiveWordbookId] = useAtom(activeWordbookAtom);
   const [practiceSource, setPracticeSource] = useAtom(practiceSourceAtom);
+  const due = useDueWordCount(
+    service,
+    activeWordbookId,
+    wordbooks !== null && activeWordbookId !== null,
+    syncedVersion,
+  );
   const [countSelection, setCountSelection] = useAtom(countSelectionAtom);
   const [customCount, setCustomCount] = useAtom(customCountAtom);
   const [checkAttempt, setCheckAttempt] = useState(0);
@@ -127,6 +136,8 @@ function PracticeSetupPage() {
       wordbooks={wordbooks}
       activeWordbookId={activeWordbookId}
       onSelectWordbook={setActiveWordbookId}
+      dueCount={activeWordbookId === null ? 0 : (due?.count ?? null)}
+      dueError={due?.error ?? null}
       practiceSource={practiceSource}
       onSelectSource={(source) => {
         setPracticeSource(source);

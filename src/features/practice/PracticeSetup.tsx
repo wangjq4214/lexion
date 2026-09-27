@@ -1,3 +1,4 @@
+import { Banner } from "@astryxdesign/core/Banner";
 import { Button } from "@astryxdesign/core/Button";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Section } from "@astryxdesign/core/Section";
@@ -21,6 +22,8 @@ type PracticeSetupProps = {
   wordbooks: WordbookSummary[];
   activeWordbookId: number | null;
   onSelectWordbook: (id: number) => void;
+  dueCount: number | null;
+  dueError: string | null;
   practiceSource: PracticeSource;
   onSelectSource: (source: PracticeSource) => void;
   onBack: () => void;
@@ -40,6 +43,8 @@ export function PracticeSetup({
   wordbooks,
   activeWordbookId,
   onSelectWordbook,
+  dueCount,
+  dueError,
   practiceSource,
   onSelectSource,
   onBack,
@@ -73,6 +78,26 @@ export function PracticeSetup({
         </Stack>
       </Section>
 
+      {selectedWordbook ? (
+        dueError ? (
+          <Banner
+            status="error"
+            title={`无法获取今日待复习词数：${dueError}`}
+          />
+        ) : dueCount === null ? (
+          <Text role="status">正在查询选定单词本今日待复习词数…</Text>
+        ) : (
+          <Banner
+            status={dueCount > 0 ? "info" : "success"}
+            title={`选定单词本今日待复习 ${dueCount} 个词`}
+            description={
+              dueCount > 0
+                ? undefined
+                : `「${selectedWordbook.name}」今天暂无到期词`
+            }
+          />
+        )
+      ) : null}
       <Section>
         <Stack gap={6}>
           <Heading level={2}>练习设置</Heading>

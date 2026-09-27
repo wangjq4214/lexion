@@ -79,6 +79,31 @@ impl WordbookRepository {
             |row| row.get(0),
         )?)
     }
+    /// Count distinct word-and-meaning pairs due before tomorrow among current wordbooks.
+    pub fn due_word_count(
+        &self,
+        wordbook_id: Option<i64>,
+        tomorrow: f64,
+    ) -> Result<u64, RepositoryError> {
+        if wordbook_id.is_some_and(|id| id <= 0) || !tomorrow.is_finite() || tomorrow <= 0.0 {
+            return Err(RepositoryError::Validation("无效的待复习查询"));
+        }
+        let connection = self.connect()?;
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM (
+                SELECT DISTINCT e.normalized_english, e.chinese FROM entries e
+                WHERE (?1 IS NULL OR e.wordbook_id = ?1)
+                  AND EXISTS (
+                    SELECT 1 FROM review_memory m
+                    WHERE m.normalized_english = e.normalized_english AND m.chinese = e.chinese
+                      AND m.due_at < ?2
+                  )
+            )",
+            params![wordbook_id, tomorrow],
+            |row| row.get(0),
+        )?;
+        Ok(count as u64)
+    }
 
     pub fn set_review_target(&self, target: f64) -> Result<(), RepositoryError> {
         if !target.is_finite() || !(0.0..1.0).contains(&target) || target == 0.0 {
@@ -497,6 +522,101 @@ mod tests {
             params![english.to_lowercase(), chinese, direction],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional().unwrap()
+    }
+
+    #[test]
+    fn due_word_count_filters_membership_time_and_distinct_pairs() {
+        let dir = tempdir().unwrap();
+        let repo = WordbookRepository::open(dir.path().join("db")).unwrap();
+        let first = repo
+            .replace(
+                "first",
+                &[
+                    ImportedEntry {
+                        english: "Apple".into(),
+                        chinese: "苹果".into(),
+                    },
+                    ImportedEntry {
+                        english: "apple".into(),
+                        chinese: "水果".into(),
+                    },
+                    ImportedEntry {
+                        english: "unseen".into(),
+                        chinese: "未练".into(),
+                    },
+                ],
+                false,
+            )
+            .unwrap();
+        let second = repo
+            .replace(
+                "second",
+                &[
+                    ImportedEntry {
+                        english: "APPLE".into(),
+                        chinese: "苹果".into(),
+                    },
+                    ImportedEntry {
+                        english: "pear".into(),
+                        chinese: "梨".into(),
+                    },
+                ],
+                false,
+            )
+            .unwrap();
+        repo.add_favorite("favorite", "收藏").unwrap();
+        assert_eq!(repo.due_word_count(None, 200.0).unwrap(), 0);
+        let token = repo
+            .schedule_at("wordbook", Some(first.id), 1, "zh-to-en", 100.0, |_, _| {
+                false
+            })
+            .unwrap();
+        // Scheduling alone does not create a completed review.
+        assert_eq!(repo.due_word_count(None, 200.0).unwrap(), 0);
+        repo.complete_at(token[0].review_id, 0, 0, false, 100.0)
+            .unwrap();
+        let connection = repo.connect().unwrap();
+        // Fixed due times isolate boundary and direction from the curve coefficients.
+        connection.execute("UPDATE review_memory SET due_at = 200 WHERE normalized_english = 'apple' AND chinese = '苹果'", []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_memory VALUES ('apple', '苹果', 'en-to-zh', 100, 100, 150)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_memory VALUES ('apple', '水果', 'zh-to-en', 100, 100, 180)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_memory VALUES ('pear', '梨', 'zh-to-en', 100, 100, 250)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO review_memory VALUES ('favorite', '收藏', 'zh-to-en', 100, 100, 150)",
+                [],
+            )
+            .unwrap();
+        assert_eq!(repo.due_word_count(None, 150.0).unwrap(), 0);
+        assert_eq!(repo.due_word_count(None, 151.0).unwrap(), 1);
+        assert_eq!(repo.due_word_count(None, 201.0).unwrap(), 2);
+        assert_eq!(repo.due_word_count(Some(first.id), 201.0).unwrap(), 2);
+        assert_eq!(repo.due_word_count(Some(second.id), 201.0).unwrap(), 1);
+        assert_eq!(repo.due_word_count(None, 251.0).unwrap(), 3);
+        assert_eq!(repo.due_word_count(Some(999), 251.0).unwrap(), 0);
+        assert!(matches!(
+            repo.due_word_count(Some(0), 200.0),
+            Err(RepositoryError::Validation(_))
+        ));
+        assert!(matches!(
+            repo.due_word_count(None, f64::NAN),
+            Err(RepositoryError::Validation(_))
+        ));
     }
 
     #[test]

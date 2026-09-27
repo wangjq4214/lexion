@@ -50,6 +50,7 @@ function createService(options?: {
   const service: WordbookService = {
     pickWorkbookFile: vi.fn(async () => options?.selectedPath ?? null),
     reviewTarget: vi.fn(async () => 0.9),
+    dueWordCount: vi.fn(async () => 0),
     setReviewTarget: vi.fn(async () => {}),
     listWordbooks: vi.fn(async () => wordbooks),
     listWordbookEntries: vi.fn(async (wordbookId: number) => [
@@ -177,6 +178,115 @@ describe("App wordbook practice", () => {
     vi.useRealTimers();
   });
 
+  it("shows all-wordbook due count at home and selected-wordbook count in setup", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [
+        { id: 1, name: "基础", entryCount: 2 },
+        { id: 2, name: "进阶", entryCount: 2 },
+      ],
+    });
+    vi.mocked(service.dueWordCount).mockImplementation(async (id) =>
+      id === null ? 3 : id === 1 ? 2 : 1,
+    );
+    render(
+      <App
+        wordbookService={service}
+        history={createMemoryHistory({ initialEntries: ["/"] })}
+      />,
+    );
+    expect(
+      await screen.findByText("所有单词本今日待复习 3 个词"),
+    ).toBeInTheDocument();
+    expect(service.dueWordCount).toHaveBeenCalledWith(null, expect.any(Number));
+    const tomorrow = new Date();
+    tomorrow.setHours(24, 0, 0, 0);
+    expect(vi.mocked(service.dueWordCount).mock.calls[0]?.[1]).toBe(
+      tomorrow.getTime() / 1000,
+    );
+    await user.click(screen.getByRole("button", { name: "去练习" }));
+    expect(
+      await screen.findByText("选定单词本今日待复习 2 个词"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByLabelText("当前单词本"));
+    await user.click(await screen.findByRole("option", { name: /进阶/ }));
+    expect(
+      await screen.findByText("选定单词本今日待复习 1 个词"),
+    ).toBeInTheDocument();
+    await user.click(screen.getByLabelText("练习模式"));
+    await user.click(
+      await screen.findByRole("option", { name: "看英文拼中文" }),
+    );
+    expect(screen.getByText("选定单词本今日待复习 1 个词")).toBeInTheDocument();
+    expect(
+      vi.mocked(service.dueWordCount).mock.calls.map(([id]) => id),
+    ).toEqual([null, 1, 2]);
+  });
+
+  it("shows a visible completion state without a review action when nothing is due", async () => {
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+    });
+    render(
+      <App
+        wordbookService={service}
+        history={createMemoryHistory({ initialEntries: ["/"] })}
+      />,
+    );
+    expect(
+      await screen.findByText("所有单词本今日待复习 0 个词"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("今天暂无到期词")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "去练习" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("ignores an older selected-wordbook count response", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [
+        { id: 1, name: "基础", entryCount: 1 },
+        { id: 2, name: "进阶", entryCount: 1 },
+      ],
+    });
+    let resolveFirst: (value: number) => void = () => {};
+    vi.mocked(service.dueWordCount).mockImplementation((id) =>
+      id === 1
+        ? new Promise<number>((resolve) => {
+            resolveFirst = resolve;
+          })
+        : Promise.resolve(4),
+    );
+    render(<App wordbookService={service} />);
+    await waitFor(() =>
+      expect(service.dueWordCount).toHaveBeenCalledWith(1, expect.any(Number)),
+    );
+    await user.click(screen.getByLabelText("当前单词本"));
+    await user.click(await screen.findByRole("option", { name: /进阶/ }));
+    expect(
+      await screen.findByText("选定单词本今日待复习 4 个词"),
+    ).toBeInTheDocument();
+    await act(async () => resolveFirst(99));
+    expect(screen.getByText("选定单词本今日待复习 4 个词")).toBeInTheDocument();
+  });
+
+  it("does not present a failed due-count query as zero", async () => {
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+    });
+    vi.mocked(service.dueWordCount).mockRejectedValue(
+      new Error("数据库不可用"),
+    );
+    render(<App wordbookService={service} />);
+    expect(
+      await screen.findByText(/无法获取今日待复习词数：数据库不可用/),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/选定单词本今日待复习 0 个词/),
+    ).not.toBeInTheDocument();
+  });
+
   it("imports through home and selects the new wordbook on practice setup", async () => {
     const user = userEvent.setup();
     const service = createService({ selectedPath: "C:\\books\\starter.xlsx" });
@@ -300,6 +410,7 @@ describe("App wordbook practice", () => {
       await screen.findByRole("heading", { name: "练习设置" }),
     ).toBeInTheDocument();
     expect(screen.queryByLabelText("当前单词本")).not.toBeInTheDocument();
+    expect(screen.queryByText(/选定单词本今日待复习/)).not.toBeInTheDocument();
     await user.click(await screen.findByLabelText("练习来源"));
     await user.click(await screen.findByRole("option", { name: "收藏夹" }));
     await user.click(screen.getByRole("button", { name: "开始练习" }));
