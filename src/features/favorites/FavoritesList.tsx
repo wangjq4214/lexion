@@ -64,7 +64,9 @@ export function FavoritesList({
                       isLoading={removingId === entry.id}
                       isDisabled={removingId !== null}
                       onClick={() => onRemove(entry)}
-                    />
+                    >
+                      移除
+                    </Button>
                   }
                 />
               ))}
