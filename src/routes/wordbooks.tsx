@@ -252,7 +252,9 @@ function WordbooksPage() {
                             entry,
                           });
                         }}
-                      />
+                      >
+                        移除
+                      </Button>
                     }
                   />
                 ))}

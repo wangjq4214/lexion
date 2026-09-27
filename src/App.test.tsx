@@ -2292,13 +2292,13 @@ describe("file routes and round navigation", () => {
     );
     expect(
       await screen.findByRole("button", { name: "删除 cat：猫" }),
-    ).toBeInTheDocument();
+    ).toHaveTextContent(/^移除$/);
     expect(instance.listWordbookEntries).toHaveBeenCalledWith(1);
     expect(instance.sampleWordbook).not.toHaveBeenCalled();
     await user.click(screen.getByRole("button", { name: "浏览 进阶" }));
     expect(
       await screen.findByRole("button", { name: "删除 dog：狗" }),
-    ).toBeInTheDocument();
+    ).toHaveTextContent(/^移除$/);
     expect(
       screen.queryByRole("button", { name: "删除 apple：苹果" }),
     ).not.toBeInTheDocument();
