@@ -1,7 +1,8 @@
 # Discover LAN Peers with mDNS and Display a Pairing Code
 
-**Status:** Implementing
+**Status:** Superseded
 **Date:** 2026-09-26
+**Superseded by:** [ADR 0012](./0012-relay-applied-operations-through-paired-devices.md)
 
 ## Context
 

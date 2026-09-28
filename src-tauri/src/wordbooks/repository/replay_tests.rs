@@ -105,32 +105,36 @@ fn binding_replay_origin_requires_empty_history_and_survives_restart() {
 }
 
 #[test]
-fn exchange_rejects_spoofed_origin_dependencies_gaps_and_legacy() {
+fn exchange_accepts_relay_but_rejects_missing_dependencies_gaps_and_legacy() {
     let dir = tempdir().unwrap();
     let a = repo(dir.path(), "a");
     let b = repo(dir.path(), "b");
     let c = repo(dir.path(), "c");
     b.add_favorite("first", "一").unwrap();
     let first = b
-        .exchange_batch(&a.replay_device_id().unwrap(), 0, 1)
+        .exchange_batch(&a.replay_device_id().unwrap(), &BTreeMap::new(), 1)
         .unwrap()
         .remove(0);
     c.add_favorite("third", "三").unwrap();
     let c_change = c
-        .exchange_batch(&b.replay_device_id().unwrap(), 0, 1)
+        .exchange_batch(&b.replay_device_id().unwrap(), &BTreeMap::new(), 1)
         .unwrap()
         .remove(0);
-    assert!(matches!(
-        a.exchange_ingest(&b.replay_device_id().unwrap(), &c_change),
-        Err(ReplayError::UnauthorizedOrigin)
-    ));
+    assert!(
+        a.exchange_ingest(&b.replay_device_id().unwrap(), &c_change)
+            .unwrap()
+            .inserted
+    );
     let mut forged = first.clone();
-    forged.dependencies.insert(c_change.id.clone());
+    forged.dependencies.insert(ChangeId {
+        device: c_change.id.device.clone(),
+        sequence: 2,
+    });
     assert!(matches!(
         a.exchange_ingest(&b.replay_device_id().unwrap(), &forged),
-        Err(ReplayError::UnshareableDependency(_))
+        Err(ReplayError::Invalid("unavailable causal predecessor"))
     ));
-    assert!(a.list_favorites().unwrap().is_empty());
+    assert_eq!(a.list_favorites().unwrap().len(), 1);
     assert!(
         a.exchange_ingest(&b.replay_device_id().unwrap(), &first)
             .unwrap()
@@ -147,7 +151,7 @@ fn exchange_rejects_spoofed_origin_dependencies_gaps_and_legacy() {
         a.exchange_ingest(&b.replay_device_id().unwrap(), &gap),
         Err(ReplayError::Invalid("non-contiguous exchange operation"))
     ));
-    assert_eq!(a.list_favorites().unwrap().len(), 1);
+    assert_eq!(a.list_favorites().unwrap().len(), 2);
     let legacy_path = dir.path().join("legacy");
     {
         let conn = rusqlite::Connection::open(&legacy_path).unwrap();
@@ -161,6 +165,111 @@ fn exchange_rejects_spoofed_origin_dependencies_gaps_and_legacy() {
         legacy.exchange_cursors(&b.replay_device_id().unwrap()),
         Err(ReplayError::LegacyBaseline)
     ));
+}
+
+#[test]
+fn relay_exports_causal_pages_with_original_ids_and_deduplicates_echoes() {
+    let dir = tempdir().unwrap();
+    let a = repo(dir.path(), "relay_a");
+    let b = repo(dir.path(), "relay_b");
+    let c = repo(dir.path(), "relay_c");
+    let a_id = a.replay_device_id().unwrap();
+    let b_id = b.replay_device_id().unwrap();
+    let c_id = c.replay_device_id().unwrap();
+    c.add_favorite("relay", "中").unwrap();
+    let c_change = c
+        .exchange_batch(&b_id, &BTreeMap::new(), 1)
+        .unwrap()
+        .remove(0);
+    assert_eq!(c_change.id.device, c_id);
+    b.exchange_ingest(&c_id, &c_change).unwrap();
+    b.add_favorite("later", "后").unwrap();
+    let cursors = b.exchange_cursors(&a_id).unwrap();
+    assert_eq!(cursors[&c_id], 1);
+    assert_eq!(cursors[&b_id], 1);
+    assert_eq!(cursors[&a_id], 0);
+    let first = b
+        .exchange_batch(&a_id, &BTreeMap::new(), 1)
+        .unwrap()
+        .remove(0);
+    assert_eq!(first, c_change);
+    let mut after = BTreeMap::from([(c_id.clone(), 1)]);
+    let second = b.exchange_batch(&a_id, &after, 1).unwrap().remove(0);
+    assert_eq!(second.id.device, b_id);
+    assert!(second.dependencies.contains(&first.id));
+    assert!(matches!(
+        a.exchange_ingest(&b_id, &second),
+        Err(ReplayError::Invalid("unavailable causal predecessor"))
+    ));
+    assert!(a.exchange_ingest(&b_id, &first).unwrap().inserted);
+    assert!(a.exchange_ingest(&b_id, &second).unwrap().inserted);
+    assert!(!a.exchange_ingest(&b_id, &first).unwrap().inserted);
+    assert!(!a.exchange_ingest(&b_id, &second).unwrap().inserted);
+    assert_eq!(a.list_favorites().unwrap().len(), 2);
+    assert_eq!(a.exchange_cursors(&b_id).unwrap()[&c_id], 1);
+    after.insert(b_id.clone(), 1);
+    assert!(b.exchange_batch(&a_id, &after, 16).unwrap().is_empty());
+    let mut forged = first.clone();
+    forged.occurred_at = Some(42);
+    assert!(matches!(
+        a.exchange_ingest(&b_id, &forged),
+        Err(ReplayError::Conflict(_))
+    ));
+    assert!(c.exchange_ingest(&b_id, &second).unwrap().inserted);
+    assert_eq!(c.list_favorites().unwrap().len(), 2);
+}
+
+#[test]
+fn exchange_validates_cursors_gaps_and_local_identity() {
+    let dir = tempdir().unwrap();
+    let a = repo(dir.path(), "cursor_a");
+    let b = repo(dir.path(), "cursor_b");
+    let a_id = a.replay_device_id().unwrap();
+    let b_id = b.replay_device_id().unwrap();
+    a.add_favorite("own", "己").unwrap();
+    let own = a
+        .exchange_batch(&b_id, &BTreeMap::new(), 1)
+        .unwrap()
+        .remove(0);
+    assert!(matches!(
+        a.exchange_batch(&b_id, &BTreeMap::from([(a_id.clone(), 2)]), 1),
+        Err(ReplayError::Invalid(_))
+    ));
+    assert!(matches!(
+        a.exchange_batch(&b_id, &BTreeMap::from([(DeviceId("invalid".into()), 1)]), 1),
+        Err(ReplayError::Invalid(_))
+    ));
+    assert!(matches!(
+        a.exchange_batch(&b_id, &BTreeMap::new(), 0),
+        Err(ReplayError::Invalid(_))
+    ));
+    assert!(matches!(
+        a.exchange_batch(&b_id, &BTreeMap::new(), 17),
+        Err(ReplayError::Invalid(_))
+    ));
+    assert!(!a.exchange_ingest(&b_id, &own).unwrap().inserted);
+    let mut forged = own.clone();
+    forged.content.push(0);
+    assert!(matches!(
+        a.exchange_ingest(&b_id, &forged),
+        Err(ReplayError::Invalid(_))
+    ));
+    forged.id.sequence = 2;
+    assert!(matches!(
+        a.exchange_ingest(&b_id, &forged),
+        Err(ReplayError::Invalid(_))
+    ));
+    let third_party = DeviceId("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+    let hole = remote(&third_party.0, 2, "set:x:hole", BTreeSet::new());
+    assert!(matches!(
+        a.exchange_ingest(&b_id, &hole),
+        Err(ReplayError::Invalid("non-contiguous exchange operation"))
+    ));
+    assert!(!a
+        .exchange_cursors(&b_id)
+        .unwrap()
+        .contains_key(&third_party));
+    assert_eq!(ledger(&a).len(), 1);
 }
 
 #[test]

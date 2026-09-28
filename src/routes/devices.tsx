@@ -58,7 +58,7 @@ function DevicesPage() {
         </Stack>
       </Section>
       <Text color="secondary">
-        首次配对请在两台设备上核对相同的八位数字，并分别输入对方屏幕上的数字确认。配对仅授权这两台设备；再次相遇时会自动交换学习变更。
+        首次配对请在两台设备上核对相同的八位数字，并分别输入对方屏幕上的数字确认。仅已配对设备可直接连接；配对后会自动交换彼此已生效的学习变更，包括从其他设备同步的变更。请只与自己的设备配对。
       </Text>
       {loadError ? <Text role="alert">连接服务失败：{loadError}</Text> : null}
       {actionError ? (

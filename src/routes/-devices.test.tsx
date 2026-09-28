@@ -38,6 +38,9 @@ it("requires the entered peer code before allowing confirmation", async () => {
       history={createMemoryHistory({ initialEntries: ["/devices"] })}
     />,
   );
+  expect(
+    await screen.findByText(/包括从其他设备同步的变更/),
+  ).toBeInTheDocument();
   const confirm = await screen.findByRole("button", {
     name: "双方数字一致，确认配对",
   });

@@ -1,6 +1,6 @@
 //! Authenticated discovery, pairing and bounded direct-peer learning exchange.
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     fs::{self, OpenOptions},
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -796,47 +796,62 @@ impl LanService {
         initiator: bool,
     ) -> Result<()> {
         let peer = self.pinned_origin(&peer.0, repo, stream, transport, initiator)?;
-        let cursor = repo
+        let cursors = repo
             .exchange_cursors(&peer)
-            .map_err(|e| format!("Sync cursor: {e:?}"))?[&peer];
+            .map_err(|e| format!("Sync cursor: {e:?}"))?;
         let deadline = Instant::now() + Duration::from_secs(120);
-        let remote_cursor = if initiator {
+        let remote_cursors = if initiator {
             send_sync(
                 stream,
                 transport,
-                &SyncMessage::Start { version: 1, cursor },
+                &SyncMessage::Start {
+                    version: 2,
+                    cursors: cursors.clone(),
+                },
             )?;
             match receive_sync(stream, transport, deadline)? {
-                SyncMessage::Start { version: 1, cursor } => cursor,
+                SyncMessage::Start {
+                    version: 2,
+                    cursors,
+                } => cursors,
                 _ => return Err("Invalid sync introduction".into()),
             }
         } else {
             let received = match receive_sync(stream, transport, deadline)? {
-                SyncMessage::Start { version: 1, cursor } => cursor,
+                SyncMessage::Start {
+                    version: 2,
+                    cursors,
+                } => cursors,
                 _ => return Err("Invalid sync introduction".into()),
             };
             send_sync(
                 stream,
                 transport,
-                &SyncMessage::Start { version: 1, cursor },
+                &SyncMessage::Start {
+                    version: 2,
+                    cursors: cursors.clone(),
+                },
             )?;
             received
         };
         let local = repo
             .replay_device_id()
             .map_err(|e| format!("Replay identity: {e:?}"))?;
-        let local_cursor = repo
-            .exchange_cursors(&peer)
-            .map_err(|e| format!("Sync cursor: {e:?}"))?[&local];
-        if remote_cursor > local_cursor {
-            return Err("Peer reported an impossible sync cursor".into());
+        if remote_cursors.len() > 512
+            || remote_cursors
+                .values()
+                .any(|cursor| *cursor > i64::MAX as u64)
+            || remote_cursors.get(&local).copied().unwrap_or(0)
+                > cursors.get(&local).copied().unwrap_or(0)
+        {
+            return Err("Peer reported an invalid sync cursor".into());
         }
         if initiator {
-            self.send_changes(repo, &peer, remote_cursor, stream, transport)?;
+            self.send_changes(repo, &peer, remote_cursors, stream, transport)?;
             self.receive_changes(repo, &peer, stream, transport, deadline)?;
         } else {
             self.receive_changes(repo, &peer, stream, transport, deadline)?;
-            self.send_changes(repo, &peer, remote_cursor, stream, transport)?;
+            self.send_changes(repo, &peer, remote_cursors, stream, transport)?;
         }
         Ok(())
     }
@@ -844,24 +859,26 @@ impl LanService {
         &self,
         repo: &WordbookRepository,
         peer: &DeviceId,
-        mut cursor: u64,
+        mut cursors: BTreeMap<DeviceId, u64>,
         stream: &mut TcpStream,
         transport: &mut TransportState,
     ) -> Result<()> {
-        for _ in 0..MAX_SYNC_CHANGES {
-            let mut batch = repo
-                .exchange_batch(peer, cursor, 1)
+        for _ in (0..MAX_SYNC_CHANGES).step_by(16) {
+            let batch = repo
+                .exchange_batch(peer, &cursors, 16)
                 .map_err(|e| format!("Sync export: {e:?}"))?;
-            let Some(change) = batch.pop() else {
+            if batch.is_empty() {
                 send_sync(stream, transport, &SyncMessage::Done { complete: true })?;
                 return Ok(());
-            };
-            cursor = change.id.sequence;
-            send_sync(stream, transport, &SyncMessage::Change(change))?;
+            }
+            for change in batch {
+                cursors.insert(change.id.device.clone(), change.id.sequence);
+                send_sync(stream, transport, &SyncMessage::Change(change))?;
+            }
         }
         // A capped session is never acknowledged as fully synchronized.
         let complete = repo
-            .exchange_batch(peer, cursor, 1)
+            .exchange_batch(peer, &cursors, 1)
             .map_err(|e| format!("Sync export: {e:?}"))?
             .is_empty();
         send_sync(stream, transport, &SyncMessage::Done { complete })?;
@@ -1024,11 +1041,18 @@ enum Message {
 #[derive(Debug, Serialize, Deserialize)]
 enum SyncMessage {
     Identity(DeviceId),
-    Start { version: u32, cursor: u64 },
+    Start {
+        version: u32,
+        cursors: BTreeMap<DeviceId, u64>,
+    },
     Change(Envelope),
     // Followed by encrypted raw chunks containing exactly length bytes of one Change.
-    ChangeStart { length: usize },
-    Done { complete: bool },
+    ChangeStart {
+        length: usize,
+    },
+    Done {
+        complete: bool,
+    },
 }
 fn send_frame(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
     send_bounded_frame(stream, bytes, MAX_FRAME)
@@ -1684,7 +1708,7 @@ mod tests {
         )
         .unwrap();
         let change = ar
-            .exchange_batch(&br.replay_device_id().unwrap(), 0, 1)
+            .exchange_batch(&br.replay_device_id().unwrap(), &BTreeMap::new(), 1)
             .unwrap();
         assert!(
             serde_json::to_vec(&SyncMessage::Change(change[0].clone()))
@@ -1823,7 +1847,7 @@ mod tests {
     }
 
     #[test]
-    fn network_rejects_third_party_and_unpaired_peer() {
+    fn network_relays_applied_third_party_changes_without_direct_pairing() {
         let ad = tempfile::tempdir().unwrap();
         let bd = tempfile::tempdir().unwrap();
         let cd = tempfile::tempdir().unwrap();
@@ -1837,33 +1861,32 @@ mod tests {
         assert!(left.is_ok(), "{left:?}");
         assert!(right.is_ok(), "{right:?}");
         assert!(ar.list_favorites().unwrap().is_empty());
+        br.add_favorite("dependent", "乙").unwrap();
         let (left, right) = connect_pair(&a, &b);
         assert!(left.is_ok(), "{left:?}");
         assert!(right.is_ok(), "{right:?}");
-        assert!(ar.list_favorites().unwrap().is_empty());
-        br.add_favorite("dependent", "乙").unwrap();
-        let (left, right) = connect_pair(&a, &b);
-        assert!(left.is_err() || right.is_err());
-        assert!(ar.list_favorites().unwrap().is_empty());
-        assert!(matches!(
-            br.exchange_batch(&ar.replay_device_id().unwrap(), 0, 16),
-            Err(crate::wordbooks::repository::replay::ReplayError::UnshareableDependency(_))
-        ));
+        assert_eq!(ar.list_favorites().unwrap().len(), 2);
+        assert_eq!(
+            ar.exchange_cursors(&br.replay_device_id().unwrap())
+                .unwrap()[&cr.replay_device_id().unwrap()],
+            1
+        );
+        // Pairing is still required for a direct A-C connection.
         assert!(!a
             .state
             .lock()
             .unwrap()
             .trusted
             .contains_key(&hex::encode(snow_public(&c.key).unwrap())));
-        assert!(ar.list_favorites().unwrap().is_empty());
-        let forged = cr
-            .exchange_batch(&br.replay_device_id().unwrap(), 0, 1)
-            .unwrap()
-            .remove(0);
-        assert!(matches!(
-            ar.exchange_ingest(&br.replay_device_id().unwrap(), &forged),
-            Err(crate::wordbooks::repository::replay::ReplayError::UnauthorizedOrigin)
-        ));
+        let (left, right) = connect_pair(&b, &c);
+        assert!(left.is_ok(), "{left:?}");
+        assert!(right.is_ok(), "{right:?}");
+        assert_eq!(cr.list_favorites().unwrap().len(), 2);
+        let (left, right) = connect_pair(&a, &b);
+        assert!(left.is_ok(), "{left:?}");
+        assert!(right.is_ok(), "{right:?}");
+        assert_eq!(ar.list_favorites().unwrap().len(), 2);
+        assert_eq!(br.list_favorites().unwrap().len(), 2);
     }
     #[test]
     fn mismatch_cancels() {

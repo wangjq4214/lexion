@@ -1,6 +1,6 @@
 # 局域网离线学习数据同步 · 票据关系
 
-**Source:** [需求规格 0004](../../spec/0004-offline-lan-learning-data-sync.md)；[ADR 0009](../../adr/0009-support-offline-multi-device-lan-sync.md)、[ADR 0010](../../adr/0010-discover-lan-peers-with-mdns-and-display-pairing-code.md)
+**Source:** [需求规格 0004](../../spec/0004-offline-lan-learning-data-sync.md)；[ADR 0009](../../adr/0009-support-offline-multi-device-lan-sync.md)、[ADR 0012](../../adr/0012-relay-applied-operations-through-paired-devices.md)（取代 ADR 0010）
 **Ticket folder:** `.grimoire/ticket/0001-offline-lan-learning-data-sync/`
 
 ## Overview
@@ -11,7 +11,7 @@
 
 - Rust/SQLite：`src-tauri/src/wordbooks/repository.rs`、`schedule.rs` 中的持久写入、变更记录、稳定身份及复习状态。
 - 桌面边界：`src-tauri/src/lib.rs` 的同步服务和 Tauri 命令、`src/data/wordbooks.ts` 与同步界面的状态/配对操作。
-- 局域网：mDNS 发现、Noise 加密配对、已授权对端的增量交换与重连。
+- 局域网：mDNS 发现、Noise 加密配对、已配对对端之间转发各自已生效的日志（含第三方原始作者）、按作者补缺与重连。
 - 验证：Rust/SQLite 双端与三端重放测试、桌面配对/离线/重连演练。
 
 ## Dependency Graph
@@ -21,7 +21,7 @@
 | T0001 | T0002, T0003, T0005 | 词书与学习结果需要持久变更身份、顺序、去重和重放约定；交换也需读取并应用此约定。 |
 | T0002 | T0005 | 完整学习数据交换验收需要词书、词条和收藏的可重放写入。 |
 | T0003 | T0005 | 完整学习数据交换验收需要错题、复习和设置的可重放写入。 |
-| T0004 | T0005 | 未经安全配对与授权不得连接并交换数据。 |
+| T0004 | T0005 | 未经安全配对与授权不得直接连接交换；已配对对端可担保经其转发的第三方来源。 |
 
 ## Coordination Risks
 
@@ -47,7 +47,7 @@ T0001 和 T0004 可并行启动；T0001 后完成 T0002、T0003；T0002、T0003�
 | 1. 离线修改、相遇自动同步、无常在线主机 | T0001、T0002、T0003、T0005 |
 | 2. 全部持久学习数据及本机状态边界 | T0002、T0003、T0005 |
 | 3. 因果/并发排序、重放、时间戳、去重 | T0001、T0002、T0003、T0005 |
-| 4. mDNS、Noise、配对码、明确配对、不传递信任 | T0004、T0005 |
+| 4. mDNS、Noise、配对码、同用户设备的已配对连接与已生效日志转发 | T0004、T0005 |
 | 5. 从全新数据开始、不自动清除旧数据 | T0001、T0005 |
 
 ## Ticket Index
@@ -58,4 +58,4 @@ T0001 和 T0004 可并行启动；T0001 后完成 T0002、T0003；T0002、T0003�
 | T0002 | [词书词条与收藏同步](./T0002-wordbooks-and-favorites.md) | 内容操作与收藏跨设备稳定收敛 |
 | T0003 | [错题复习与设置同步](./T0003-learning-history-and-settings.md) | 学习事件、复习调度及目标设置保持语义并收敛 |
 | T0004 | [局域网发现与安全配对](./T0004-lan-discovery-and-pairing.md) | mDNS、Noise、首次配对码和明确授权的设备关系 |
-| T0005 | [自动交换与端到端同步](./T0005-automatic-peer-sync.md) | 已配对设备相遇时自动安全交换、断线恢复与界面反馈 |
+| T0005 | [自动交换与端到端同步](./T0005-automatic-peer-sync.md) | 含第三方作者的已生效操作转发、按作者增量续传与三设备端到端收敛 |
