@@ -213,7 +213,45 @@ function PracticePage() {
       setIsFavoriteBusy(false);
     }
   };
-  const saveMistake = async (submission: MistakeSubmission) => {
+  const completedReviews = useRef(new Set<number>());
+  const persistReview = async (
+    reviewId: number | undefined,
+    errorCount: number,
+    hintCount: number,
+    skipped: boolean,
+  ): Promise<boolean> => {
+    if (reviewId === undefined) {
+      setReviewWriteError("复习记录缺少题目身份，请重新开始练习。");
+      return false;
+    }
+    if (completedReviews.current.has(reviewId)) return true;
+    if (completingReview.current) return false;
+    completingReview.current = true;
+    setReviewWriteError(null);
+    setIsCompleting(true);
+    try {
+      await withWriteTimeout(
+        service.completeReview({ reviewId, errorCount, hintCount, skipped }),
+        "复习进度尚未保存，请稍后重试。",
+      );
+      completedReviews.current.add(reviewId);
+      return true;
+    } catch (error) {
+      setReviewWriteError(
+        `保存复习进度失败，请重试：${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    } finally {
+      completingReview.current = false;
+      setIsCompleting(false);
+    }
+  };
+  const saveMistake = async (
+    submission: MistakeSubmission,
+    reviewId: number | undefined,
+    errorCount: number,
+    hintCount: number,
+  ) => {
     if (savingMistakeRef.current) return;
     savingMistakeRef.current = true;
     setIsSavingMistake(true);
@@ -227,6 +265,7 @@ function PracticePage() {
       await withWriteTimeout(write, "错题记录尚未完成，请稍后重试。");
       pendingMistakeRef.current = null;
       setPendingMistake(null);
+      await persistReview(reviewId, errorCount, hintCount, false);
     } catch (error) {
       setMistakeWriteError(
         `记录错题失败：${error instanceof Error ? error.message : String(error)}`,
@@ -253,32 +292,15 @@ function PracticePage() {
       return;
     }
     const question = state.questions[state.questionIndex];
-    if (question.reviewId === undefined) {
-      setReviewWriteError("复习记录缺少题目身份，请重新开始练习。");
-      return;
-    }
-    completingReview.current = true;
-    setReviewWriteError(null);
-    setIsCompleting(true);
-    try {
-      await withWriteTimeout(
-        service.completeReview({
-          reviewId: question.reviewId,
-          errorCount: state.questionErrorCount,
-          hintCount: state.questionHintCount,
-          skipped: type !== "submit-answer" && state.revealReason === "skip",
-        }),
-        "复习进度尚未保存，请稍后重试。",
-      );
+    const saved = await persistReview(
+      question.reviewId,
+      state.questionErrorCount,
+      state.questionHintCount,
+      type !== "submit-answer" && state.revealReason === "skip",
+    );
+    if (saved) {
       setElapsedSeconds(currentElapsed);
       dispatch({ type, elapsedSeconds: currentElapsed });
-    } catch (error) {
-      setReviewWriteError(
-        `保存复习进度失败，请重试：${error instanceof Error ? error.message : String(error)}`,
-      );
-    } finally {
-      completingReview.current = false;
-      setIsCompleting(false);
     }
   };
   const submitAnswer = () => {
@@ -300,7 +322,12 @@ function PracticePage() {
       pendingMistakeRef.current = submission;
       setPendingMistake(submission);
       dispatch({ type: "submit-answer", elapsedSeconds });
-      void saveMistake(submission);
+      void saveMistake(
+        submission,
+        question.reviewId,
+        state.questionErrorCount + 1,
+        state.questionHintCount,
+      );
       return;
     }
     void completeQuestion("submit-answer");
@@ -397,7 +424,14 @@ function PracticePage() {
               label="重试保存错题"
               variant="secondary"
               isLoading={isSavingMistake}
-              onClick={() => void saveMistake(pendingMistake)}
+              onClick={() =>
+                void saveMistake(
+                  pendingMistake,
+                  state.questions[state.questionIndex].reviewId,
+                  state.questionErrorCount,
+                  state.questionHintCount,
+                )
+              }
             />
           ) : (
             <Button
@@ -432,7 +466,8 @@ function PracticePage() {
           if (
             completingReview.current ||
             pendingMistakeRef.current ||
-            deletingRef.current
+            deletingRef.current ||
+            state.revealReason !== null
           )
             return;
           if (state.hintLevel === 0)
@@ -443,15 +478,32 @@ function PracticePage() {
                 random,
               ),
             });
-          else dispatch({ type: "advance-hint" });
+          else {
+            dispatch({ type: "advance-hint" });
+            if (state.hintLevel === 2)
+              void persistReview(
+                state.questions[state.questionIndex].reviewId,
+                state.questionErrorCount,
+                state.questionHintCount + 1,
+                true,
+              );
+          }
         }}
         onSkip={() => {
           if (
-            !completingReview.current &&
-            !pendingMistakeRef.current &&
-            !deletingRef.current
+            completingReview.current ||
+            pendingMistakeRef.current ||
+            deletingRef.current ||
+            state.revealReason !== null
           )
-            dispatch({ type: "skip-question" });
+            return;
+          dispatch({ type: "skip-question" });
+          void persistReview(
+            state.questions[state.questionIndex].reviewId,
+            state.questionErrorCount,
+            state.questionHintCount,
+            true,
+          );
         }}
         onSubmit={submitAnswer}
         onExit={() => void completeQuestion("exit-and-settle")}

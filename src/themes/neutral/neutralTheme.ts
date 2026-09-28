@@ -101,6 +101,21 @@ export const neutralTheme = defineTheme({
   syntax: neutralSyntax,
 
   tokens: {
+    // Keep the existing type hierarchy while adding 2px to every size tier.
+    // Semantic text and heading sizes already reference these raw tokens.
+    "--font-size-4xs": "0.5rem",
+    "--font-size-3xs": "0.5625rem",
+    "--font-size-2xs": "0.625rem",
+    "--font-size-xs": "0.75rem",
+    "--font-size-sm": "0.875rem",
+    "--font-size-base": "1rem",
+    "--font-size-lg": "1.1875rem",
+    "--font-size-xl": "1.375rem",
+    "--font-size-2xl": "1.625rem",
+    "--font-size-3xl": "1.9375rem",
+    "--font-size-4xl": "2.3125rem",
+    "--font-size-5xl": "2.75rem",
+
     "--color-background-surface": [neutral.light[100], neutral.dark[15]],
     "--color-background-body": [neutral.light[95], neutral.dark[10]],
     "--color-background-card": [neutral.light[100], neutral.dark[10]],

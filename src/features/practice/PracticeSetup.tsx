@@ -65,7 +65,7 @@ export function PracticeSetup({
       <Section paddingBlockStart={6} paddingBlockEnd={0}>
         <Stack direction="horizontal" gap={3} justify="between" wrap="wrap">
           <Stack gap={2}>
-            <Heading level={1}>Lexicon 单词练习</Heading>
+            <Heading level={1}>Lexion 单词练习</Heading>
             <Text color="secondary">选择练习内容和方式，开始本轮练习。</Text>
           </Stack>
           <Button

@@ -4,6 +4,7 @@ import { List, ListItem } from "@astryxdesign/core/List";
 import { Section } from "@astryxdesign/core/Section";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
+import type { CSSProperties } from "react";
 import type { MistakeEntry } from "../../data/wordbooks";
 
 type MistakesListProps = {
@@ -49,8 +50,24 @@ export function MistakesList({
                 <ListItem
                   key={entry.id}
                   label={entry.english}
-                  description={entry.chinese}
-                  endContent={<Text>错误次数：{entry.errorCount}</Text>}
+                  style={
+                    {
+                      "--text-body-size": "var(--font-size-xl)",
+                    } as CSSProperties
+                  }
+                  description={
+                    <Text
+                      type="large"
+                      weight="normal"
+                      color="secondary"
+                      wordBreak="break-word"
+                    >
+                      {entry.chinese}
+                    </Text>
+                  }
+                  endContent={
+                    <Text size="base">错误次数：{entry.errorCount}</Text>
+                  }
                 />
               ))}
             </List>

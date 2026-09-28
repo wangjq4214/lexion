@@ -1,7 +1,8 @@
 # Schedule Practice With Source Coverage and Due Review
 
-**Status:** Implementing
+**Status:** Superseded
 **Date:** 2026-09-23
+**Superseded by:** [ADR 0011](./0011-count-practice-coverage-on-completion.md) — it changes the timing and priority of coverage while carrying forward the remaining scheduling decisions.
 
 ## Context
 

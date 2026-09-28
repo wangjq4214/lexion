@@ -26,7 +26,7 @@ function HomePage() {
     <Stack gap={6}>
       <Section paddingBlockStart={6} paddingBlockEnd={0}>
         <Stack gap={2}>
-          <Heading level={1}>Lexicon 单词学习</Heading>
+          <Heading level={1}>Lexion 单词学习</Heading>
           <Text color="secondary">选择练习或考试，进入后再设置具体模式。</Text>
         </Stack>
       </Section>

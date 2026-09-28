@@ -13,7 +13,7 @@ import {
   useNavigate,
 } from "@tanstack/react-router";
 import { useAtomValue } from "jotai";
-import { useRef, useState } from "react";
+import { type CSSProperties, useRef, useState } from "react";
 import type {
   ExamQuestion,
   ExamRequest,
@@ -299,6 +299,11 @@ function ExamPage() {
                   <ListItem
                     key={`${question.direction}:${question.entry.id}`}
                     label={`${index + 1}. ${prompt}`}
+                    style={
+                      {
+                        "--text-body-size": "var(--font-size-xl)",
+                      } as CSSProperties
+                    }
                     description={
                       <Stack gap={2}>
                         <Text color="secondary">
@@ -321,7 +326,7 @@ function ExamPage() {
                           width="100%"
                         />
                         {graded ? (
-                          <Text>
+                          <Text size="xl">
                             {graded.correct ? "正确" : "错误"}；正确答案：
                             {graded.expected}
                           </Text>

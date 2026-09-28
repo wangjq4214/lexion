@@ -974,6 +974,15 @@ describe("App wordbook practice", () => {
     expect(screen.getByText("英文：apple")).toBeInTheDocument();
     expect(screen.getByText("中文释义：苹果")).toBeInTheDocument();
     expect(screen.getByText("0 / 2")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(service.completeReview).toHaveBeenCalledWith({
+        reviewId: 1,
+        errorCount: 0,
+        hintCount: 0,
+        skipped: true,
+      }),
+    );
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
     expect(
       screen.queryByRole("button", { name: "跳过" }),
     ).not.toBeInTheDocument();
@@ -981,6 +990,7 @@ describe("App wordbook practice", () => {
       screen.queryByRole("button", { name: "提交答案" }),
     ).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "下一题" }));
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
     await user.type(screen.getByLabelText("英文答案"), "book{Enter}");
     expect(screen.getByText("答对题数：1 / 2")).toBeInTheDocument();
     expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
@@ -1076,6 +1086,7 @@ describe("App wordbook practice", () => {
     fireEvent.click(screen.getByRole("button", { name: "显示第 1 级提示" }));
     now = 5_000;
     fireEvent.click(screen.getByRole("button", { name: "跳过" }));
+    await act(async () => undefined);
     now = 8_000;
     act(() => vi.advanceTimersByTime(1_000));
     expect(screen.getByText("本轮用时：0:08")).toBeInTheDocument();
@@ -1746,6 +1757,42 @@ describe("App wordbook practice", () => {
     await user.click(await screen.findByRole("button", { name: "错题本" }));
     expect(await screen.findByText("错误次数：1")).toBeInTheDocument();
   });
+  it.each([
+    { action: "wrong", errorCount: 1, skipped: false },
+    { action: "skip", errorCount: 0, skipped: true },
+  ] as const)(
+    "persists $action before feedback continuation and does not duplicate on exit",
+    async ({ action, errorCount, skipped }) => {
+      const user = userEvent.setup();
+      const service = createService({
+        wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+        samples: { 1: [{ id: 1, english: "apple", chinese: "苹果" }] },
+      });
+      render(<App wordbookService={service} />);
+      await user.click(await screen.findByRole("button", { name: "开始练习" }));
+      if (action === "wrong") {
+        await user.type(screen.getByLabelText("英文答案"), "wrong{Enter}");
+        expect(screen.getByText(/本题答错/)).toBeInTheDocument();
+      } else {
+        await user.click(screen.getByRole("button", { name: "跳过" }));
+        expect(screen.getByText("英文：apple")).toBeInTheDocument();
+      }
+      await waitFor(() =>
+        expect(service.completeReview).toHaveBeenCalledWith({
+          reviewId: 1,
+          errorCount,
+          hintCount: 0,
+          skipped,
+        }),
+      );
+      expect(service.completeReview).toHaveBeenCalledTimes(1);
+      expect(screen.queryByText("已完成题数：1")).not.toBeInTheDocument();
+      await user.click(screen.getByRole("button", { name: "退出并结算" }));
+      expect(await screen.findByText("已完成题数：1")).toBeInTheDocument();
+      expect(service.completeReview).toHaveBeenCalledTimes(1);
+    },
+  );
+
   it("sends each question’s error and hint counts separately", async () => {
     const user = userEvent.setup();
     const service = createService({
@@ -1772,8 +1819,15 @@ describe("App wordbook practice", () => {
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "下一题" })).toBeEnabled(),
     );
-    expect(service.completeReview).not.toHaveBeenCalled();
+    expect(service.completeReview).toHaveBeenCalledWith({
+      reviewId: 1,
+      errorCount: 1,
+      hintCount: 2,
+      skipped: false,
+    });
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
     await user.click(screen.getByRole("button", { name: "下一题" }));
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
     await waitFor(() =>
       expect(service.completeReview).toHaveBeenCalledWith({
         reviewId: 1,
@@ -1810,14 +1864,15 @@ describe("App wordbook practice", () => {
         }),
       );
     }
-    expect(service.completeReview).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "查看练习结果" }));
     expect(service.completeReview).toHaveBeenCalledWith({
       reviewId: 1,
       errorCount: 0,
       hintCount: 3,
       skipped: true,
     });
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "查看练习结果" }));
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
     expect(service.recordMistake).not.toHaveBeenCalled();
   });
   it("keeps the wrong-answer comparison on review write failure and retries without another mistake", async () => {
@@ -1839,7 +1894,6 @@ describe("App wordbook practice", () => {
         screen.getByRole("button", { name: "查看练习结果" }),
       ).toBeEnabled(),
     );
-    await user.click(screen.getByRole("button", { name: "查看练习结果" }));
     expect(await screen.findByText(/保存复习进度失败，请重试/)).toHaveAttribute(
       "role",
       "alert",
@@ -1940,12 +1994,19 @@ describe("App wordbook practice", () => {
     await user.type(screen.getByLabelText("英文答案"), "book{Enter}");
     expect(await screen.findByText("答对题数：1 / 1")).toBeInTheDocument();
     expect(screen.getByText("错误次数：0")).toBeInTheDocument();
-    expect(service.completeReview).toHaveBeenCalledTimes(1);
+    // Deleting removes the question from the round summary, not its already saved wrong outcome.
+    expect(service.completeReview).toHaveBeenCalledTimes(2);
+    expect(service.completeReview).toHaveBeenCalledWith({
+      reviewId: 1,
+      errorCount: 1,
+      hintCount: 0,
+      skipped: false,
+    });
     await user.click(screen.getByRole("button", { name: "再练一轮" }));
     expect(await screen.findByText("0 / 1")).toBeInTheDocument();
   });
 
-  it("deletes a revealed skipped question without submitting a review outcome", async () => {
+  it("deletes a revealed skipped question from the round but not its already persisted review", async () => {
     const user = userEvent.setup();
     const service = createService({
       wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
@@ -1954,13 +2015,21 @@ describe("App wordbook practice", () => {
     render(<App wordbookService={service} />);
     await user.click(await screen.findByRole("button", { name: "开始练习" }));
     await user.click(screen.getByRole("button", { name: "跳过" }));
+    await waitFor(() =>
+      expect(service.completeReview).toHaveBeenCalledWith({
+        reviewId: 1,
+        errorCount: 0,
+        hintCount: 0,
+        skipped: true,
+      }),
+    );
     await user.click(
       screen.getByRole("button", { name: "从单词本删除当前单词" }),
     );
     await user.click(screen.getByRole("button", { name: "删除单词" }));
     expect(await screen.findByText("答对题数：0 / 0")).toBeInTheDocument();
     expect(screen.getByText("跳过次数：0")).toBeInTheDocument();
-    expect(service.completeReview).not.toHaveBeenCalled();
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
   });
 
   it("settles zero completed questions without writing an unfinished review", async () => {
@@ -2021,7 +2090,12 @@ describe("App wordbook practice", () => {
     render(<App wordbookService={service} />);
     await user.click(await screen.findByRole("button", { name: "开始练习" }));
     await user.click(screen.getByRole("button", { name: "跳过" }));
-    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(service.completeReview).toHaveBeenCalledWith({
+      reviewId: 1,
+      errorCount: 0,
+      hintCount: 0,
+      skipped: true,
+    });
     expect(
       await screen.findByText(/保存复习进度失败，请重试/),
     ).toBeInTheDocument();
@@ -2031,12 +2105,9 @@ describe("App wordbook practice", () => {
     expect(await screen.findByText("已完成题数：1")).toBeInTheDocument();
     expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
     expect(service.completeReview).toHaveBeenCalledTimes(2);
-    expect(vi.mocked(service.completeReview).mock.calls[0]?.[0]).toEqual({
-      reviewId: 1,
-      errorCount: 0,
-      hintCount: 0,
-      skipped: true,
-    });
+    expect(vi.mocked(service.completeReview).mock.calls[0]?.[0]).toEqual(
+      vi.mocked(service.completeReview).mock.calls[1]?.[0],
+    );
   });
 
   it("counts the third spelling hint as a saved skip on exit", async () => {
@@ -2054,8 +2125,12 @@ describe("App wordbook practice", () => {
     ]) {
       await user.click(screen.getByRole("button", { name: label }));
     }
+    await waitFor(() =>
+      expect(service.completeReview).toHaveBeenCalledTimes(1),
+    );
     await user.click(screen.getByRole("button", { name: "退出并结算" }));
     expect(await screen.findByText("已完成题数：1")).toBeInTheDocument();
+    expect(service.completeReview).toHaveBeenCalledTimes(1);
     expect(screen.getByText("提示次数：3")).toBeInTheDocument();
     expect(screen.getByText("跳过次数：1")).toBeInTheDocument();
     expect(service.completeReview).toHaveBeenCalledWith({
@@ -2099,20 +2174,23 @@ describe("App wordbook practice", () => {
       await pendingMistake;
     });
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: "退出并结算" })).toBeEnabled(),
+      expect(service.completeReview).toHaveBeenCalledTimes(1),
     );
-    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(screen.getByRole("button", { name: "退出并结算" })).toBeDisabled();
     expect(service.completeReview).toHaveBeenCalledWith({
       reviewId: 1,
       errorCount: 1,
       hintCount: 0,
       skipped: false,
     });
-    expect(screen.getByRole("button", { name: "退出并结算" })).toBeDisabled();
     await act(async () => {
       releaseReview();
       await pendingReview;
     });
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "退出并结算" })).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
     expect(await screen.findByText("已完成题数：1")).toBeInTheDocument();
     expect(screen.getByText("错误次数：1")).toBeInTheDocument();
     expect(service.completeReview).toHaveBeenCalledTimes(1);
@@ -2551,10 +2629,6 @@ describe("file routes and round navigation", () => {
       releaseMistake();
       await pending;
     });
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "退出并结算" })).toBeEnabled(),
-    );
-    await user.click(screen.getByRole("button", { name: "退出并结算" }));
     expect(
       await screen.findByText(/保存复习进度失败，请重试/),
     ).toBeInTheDocument();

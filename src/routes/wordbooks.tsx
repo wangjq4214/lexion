@@ -7,7 +7,7 @@ import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useAtomValue } from "jotai";
-import { useEffect, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 import type { WordbookService, WordbookSummary } from "../data/wordbooks";
 import type { WordEntry } from "../domain/word";
 import { WordbookImportFlow } from "../features/wordbooks/WordbookImportFlow";
@@ -237,7 +237,21 @@ function WordbooksPage() {
                   <ListItem
                     key={entry.id}
                     label={entry.english}
-                    description={entry.chinese}
+                    style={
+                      {
+                        "--text-body-size": "var(--font-size-xl)",
+                      } as CSSProperties
+                    }
+                    description={
+                      <Text
+                        type="large"
+                        weight="normal"
+                        color="secondary"
+                        wordBreak="break-word"
+                      >
+                        {entry.chinese}
+                      </Text>
+                    }
                     endContent={
                       <Button
                         label={`删除 ${entry.english}：${entry.chinese}`}

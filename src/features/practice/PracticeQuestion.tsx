@@ -129,8 +129,10 @@ export function PracticeQuestion({
             <Text color="secondary">
               {expectsEnglish ? "请拼写对应的英文" : "请输入对应的中文"}
             </Text>
-            <Stack direction="horizontal" gap={2} align="center">
-              <Heading level={1}>{getQuestionPrompt(question)}</Heading>
+            <Stack direction="horizontal" gap={2} align="center" wrap="wrap">
+              <Heading level={1} type="display-3" wordBreak="break-word">
+                {getQuestionPrompt(question)}
+              </Heading>
               <ToggleButton
                 label={isFavorite ? "取消收藏" : "收藏这个单词"}
                 icon={<Text color="secondary">☆</Text>}
@@ -169,8 +171,12 @@ export function PracticeQuestion({
               {difference ? (
                 <>
                   <Text type="supporting">本题答错，标记部分为答案差异</Text>
-                  <Text>你的答案：{renderDiff(difference.submitted)}</Text>
-                  <Text>正确答案：{renderDiff(difference.expected)}</Text>
+                  <Text size="xl">
+                    你的答案：{renderDiff(difference.submitted)}
+                  </Text>
+                  <Text size="xl">
+                    正确答案：{renderDiff(difference.expected)}
+                  </Text>
                   <Text type="supporting">
                     差异说明：你的答案需核对{" "}
                     {describeChanges(difference.submitted)}； 正确答案需核对{" "}
@@ -180,8 +186,8 @@ export function PracticeQuestion({
               ) : (
                 <>
                   <Text type="supporting">本题答案</Text>
-                  <Text>英文：{question.entry.english}</Text>
-                  <Text>中文释义：{question.entry.chinese}</Text>
+                  <Text size="xl">英文：{question.entry.english}</Text>
+                  <Text size="xl">中文释义：{question.entry.chinese}</Text>
                 </>
               )}
               <Stack direction="horizontal" gap={3} justify="end">

@@ -33,6 +33,9 @@ describe("FavoritesList", () => {
     expect(appleButton).toHaveTextContent(/^移除$/);
     expect(orangeButton).toHaveTextContent(/^移除$/);
 
+    const appleRow = screen.getByText("apple").closest("li");
+    expect(appleRow).toHaveStyle({ "--text-body-size": "var(--font-size-xl)" });
+    expect(screen.getByText("苹果")).toHaveAttribute("data-type", "large");
     await user.click(orangeButton);
     expect(onRemove).toHaveBeenCalledExactlyOnceWith(entries[1]);
   });

@@ -958,7 +958,7 @@ fn snow_public(private: &[u8; 32]) -> Result<Vec<u8>> {
 fn local_name() -> String {
     std::env::var("COMPUTERNAME")
         .or_else(|_| std::env::var("HOSTNAME"))
-        .unwrap_or_else(|_| "Lexicon device".into())
+        .unwrap_or_else(|_| "Lexion device".into())
         .chars()
         .take(80)
         .collect()

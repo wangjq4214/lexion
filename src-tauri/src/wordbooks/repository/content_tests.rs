@@ -155,7 +155,11 @@ fn late_unrelated_change_keeps_existing_review_coverage() {
     let book = late
         .replace("studied", &[pair("Apple", "苹果")], false)
         .unwrap();
-    late.schedule_practice("wordbook", Some(book.id), 1, "zh-to-en")
+    let scheduled = late
+        .schedule_practice("wordbook", Some(book.id), 1, "zh-to-en")
+        .unwrap();
+    assert_eq!(coverage(late, book.id), 0);
+    late.complete_review(scheduled[0].review_id, 0, 0, false)
         .unwrap();
     assert_eq!(coverage(late, book.id), 1);
     exchange(early, late);

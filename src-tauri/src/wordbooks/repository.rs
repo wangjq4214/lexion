@@ -116,6 +116,9 @@ impl WordbookRepository {
         let transaction = connection.transaction()?;
         // Check before adding default settings: a legacy database has no reconstructible history.
         let legacy = replay::has_legacy_data(&transaction)?;
+        let has_legacy_coverage: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_legacy_coverage')",
+            [], |row| row.get(0))?;
         transaction.execute_batch(
             "CREATE TABLE IF NOT EXISTS wordbooks (
                 id INTEGER PRIMARY KEY,
@@ -159,6 +162,22 @@ impl WordbookRepository {
                 chinese TEXT NOT NULL,
                 PRIMARY KEY(source, source_id, normalized_english, chinese)
             );
+            CREATE TABLE IF NOT EXISTS review_legacy_coverage (
+                source TEXT NOT NULL, source_id INTEGER NOT NULL,
+                normalized_english TEXT NOT NULL, chinese TEXT NOT NULL,
+                PRIMARY KEY(source,source_id,normalized_english,chinese)
+            );
+            CREATE TABLE IF NOT EXISTS outstanding_reviews (
+                source TEXT NOT NULL,
+                source_key TEXT NOT NULL,
+                normalized_english TEXT NOT NULL,
+                chinese TEXT NOT NULL,
+                token_id INTEGER,
+                origin_device TEXT,
+                origin_sequence INTEGER,
+                origin_index INTEGER,
+                PRIMARY KEY(source, source_key, normalized_english, chinese)
+            );
             CREATE TABLE IF NOT EXISTS review_memory (
                 normalized_english TEXT NOT NULL,
                 chinese TEXT NOT NULL,
@@ -182,6 +201,14 @@ impl WordbookRepository {
             );
             INSERT OR IGNORE INTO review_settings(id, target_retention) VALUES (1, 0.9);",
         )?;
+        // Old builds counted selection as coverage. The history cannot identify which
+        // questions were actually answered, so retain that baseline without extending it.
+        if !has_legacy_coverage {
+            transaction.execute(
+                "INSERT OR IGNORE INTO review_legacy_coverage SELECT * FROM review_coverage",
+                [],
+            )?;
+        }
         let has_mistake_created_at: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info('mistake_submissions') WHERE name = 'created_at')",
             [],
@@ -240,6 +267,8 @@ impl WordbookRepository {
             )?;
         }
         for (column, definition) in [
+            ("source", "TEXT"),
+            ("source_key", "TEXT"),
             ("origin_device", "TEXT"),
             ("origin_sequence", "INTEGER"),
             ("origin_index", "INTEGER"),
@@ -1204,15 +1233,20 @@ mod tests {
         repository
             .complete_review(target_review.review_id, 0, 0, false)
             .unwrap();
-        repository
+        let second_review = repository
             .schedule_practice("wordbook", Some(second.id), 1, "zh-to-en")
             .unwrap();
-        repository
+        let favorite_review = repository
             .schedule_practice("favorites", None, 1, "zh-to-en")
             .unwrap();
-        repository
+        let mistake_review = repository
             .schedule_practice("mistakes", None, 1, "zh-to-en")
             .unwrap();
+        for review in [&second_review[0], &favorite_review[0], &mistake_review[0]] {
+            repository
+                .complete_review(review.review_id, 0, 0, false)
+                .unwrap();
+        }
         let connection = repository.connect().unwrap();
         let coverage = |source: &str, source_id: i64, english: &str| -> i64 {
             connection.query_row(
@@ -1290,7 +1324,7 @@ mod tests {
             ));
         }
         assert_eq!(repository.sample(book.id, 1).unwrap(), vec![entry]);
-        assert_eq!(coverage_count(&repository, book.id, "word-0"), 1);
+        assert_eq!(coverage_count(&repository, book.id, "word-0"), 0);
     }
 
     #[test]

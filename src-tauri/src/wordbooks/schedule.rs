@@ -64,11 +64,46 @@ struct Candidate {
     entry: WordEntry,
     normalized: String,
     covered: bool,
+    pending_order: Option<i64>,
     due_at: Option<f64>,
     direction: &'static str,
 }
 
 type PendingReviewOrigin = (Option<String>, Option<i64>, Option<i64>, bool);
+
+fn select_candidates(candidates: Vec<Candidate>, capacity: usize, now: f64) -> Vec<Candidate> {
+    let mut pending = Vec::new();
+    let mut unseen = Vec::new();
+    let mut due = Vec::new();
+    let mut other = Vec::new();
+    for candidate in candidates {
+        if candidate.pending_order.is_some() {
+            pending.push(candidate);
+        } else if !candidate.covered {
+            unseen.push(candidate);
+        } else if candidate.due_at.is_some_and(|time| time <= now) {
+            due.push(candidate);
+        } else {
+            other.push(candidate);
+        }
+    }
+    pending.sort_by_key(|item| item.pending_order.unwrap());
+    due.sort_by(|a, b| {
+        a.due_at
+            .unwrap()
+            .total_cmp(&b.due_at.unwrap())
+            .then(a.entry.id.cmp(&b.entry.id))
+    });
+    let mut selected = Vec::with_capacity(capacity);
+    selected.extend(pending.drain(..pending.len().min(capacity)));
+    let remaining = capacity - selected.len();
+    let reserve = usize::from(!unseen.is_empty());
+    selected.extend(due.drain(..due.len().min(remaining.saturating_sub(reserve))));
+    selected.extend(unseen.drain(..unseen.len().min(capacity - selected.len())));
+    selected.extend(due.drain(..due.len().min(capacity - selected.len())));
+    selected.extend(other.drain(..other.len().min(capacity - selected.len())));
+    selected
+}
 
 impl WordbookRepository {
     pub fn review_target(&self) -> Result<f64, RepositoryError> {
@@ -194,11 +229,20 @@ impl WordbookRepository {
                 return Err(RepositoryError::Validation("单词本不存在"));
             }
         }
+        let source_key: String = if source == "wordbook" {
+            transaction.query_row("SELECT name FROM wordbooks WHERE id=?1", [source_id], |r| {
+                r.get(0)
+            })?
+        } else {
+            String::new()
+        };
         // Fixed table names from the validated source, never user-provided SQL.
         let sql = format!(
             "SELECT e.id, e.english, e.chinese, e.normalized_english,
-                    c.source IS NOT NULL, zh.due_at, en.due_at
+                    c.source IS NOT NULL, zh.due_at, en.due_at, o.rowid
              FROM {table} e
+             LEFT JOIN outstanding_reviews o ON o.source=?1 AND o.source_key=?3
+               AND o.normalized_english=e.normalized_english AND o.chinese=e.chinese
              LEFT JOIN review_coverage c ON c.source = ?1 AND c.source_id = ?2
                AND c.normalized_english = e.normalized_english AND c.chinese = e.chinese
              LEFT JOIN review_memory zh ON zh.normalized_english = e.normalized_english
@@ -214,7 +258,7 @@ impl WordbookRepository {
         );
         let mut candidates: Vec<Candidate> = {
             let mut statement = transaction.prepare(&sql)?;
-            let rows = statement.query_map(params![source, source_id], |row| {
+            let rows = statement.query_map(params![source, source_id, source_key], |row| {
                 let english: String = row.get(3)?;
                 let chinese: String = row.get(2)?;
                 let direction = match mode {
@@ -230,58 +274,35 @@ impl WordbookRepository {
                     },
                     normalized: english,
                     covered: row.get(4)?,
+                    pending_order: row.get(7)?,
                     due_at: row.get(if direction == "zh-to-en" { 5 } else { 6 })?,
                     direction,
                 })
             })?;
             rows.collect::<Result<_, _>>()?
         };
-        let mut unseen = Vec::new();
-        let mut due = Vec::new();
-        let mut other = Vec::new();
-        for candidate in candidates.drain(..) {
-            if !candidate.covered {
-                unseen.push(candidate);
-            } else if candidate.due_at.is_some_and(|due_at| due_at <= now) {
-                due.push(candidate);
-            } else {
-                other.push(candidate);
-            }
-        }
-        due.sort_by(|a, b| {
-            a.due_at
-                .unwrap()
-                .total_cmp(&b.due_at.unwrap())
-                .then(a.entry.id.cmp(&b.entry.id))
-        });
-        let capacity = usize::from(limit);
-        let reserve = usize::from(!unseen.is_empty());
-        // With one slot, first exposure takes precedence; otherwise due gets all but one slot.
-        let mut selected = Vec::with_capacity(capacity);
-        selected.extend(due.drain(..due.len().min(capacity - reserve)));
-        selected.extend(unseen.drain(..unseen.len().min(capacity - selected.len())));
-        selected.extend(due.drain(..due.len().min(capacity - selected.len())));
-        selected.extend(other.drain(..other.len().min(capacity - selected.len())));
+        let selected = select_candidates(std::mem::take(&mut candidates), usize::from(limit), now);
 
         let mut result = Vec::with_capacity(selected.len());
         for candidate in selected {
             transaction.execute(
-                "INSERT OR IGNORE INTO review_coverage(source, source_id, normalized_english, chinese)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![source, source_id, candidate.normalized, candidate.entry.chinese],
-            )?;
-            transaction.execute(
-                "INSERT INTO pending_reviews(normalized_english, chinese, direction, created_at)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO pending_reviews(normalized_english, chinese, direction, created_at, source, source_key)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     candidate.normalized,
                     candidate.entry.chinese,
                     candidate.direction,
-                    now
+                    now, source, source_key
                 ],
             )?;
+            let token_id = transaction.last_insert_rowid();
+            transaction.execute("INSERT INTO outstanding_reviews(source,source_key,normalized_english,chinese,token_id)
+                VALUES (?1,?2,?3,?4,?5)
+                ON CONFLICT(source,source_key,normalized_english,chinese) DO UPDATE SET token_id=excluded.token_id,
+                    origin_device=NULL,origin_sequence=NULL,origin_index=NULL",
+                params![source, source_key, candidate.normalized, candidate.entry.chinese, token_id])?;
             result.push(ScheduledQuestion {
-                review_id: transaction.last_insert_rowid(),
+                review_id: token_id,
                 entry: candidate.entry,
                 direction: candidate.direction.to_owned(),
             });
@@ -317,7 +338,9 @@ impl WordbookRepository {
                     .map_err(|_| super::replay::ReplayError::Invalid("单词本不存在"))?)
             } else { None };
             let sql = format!("SELECT e.id,e.english,e.chinese,e.normalized_english,
-                c.source IS NOT NULL,zh.due_at,en.due_at FROM {table} e
+                c.source IS NOT NULL,zh.due_at,en.due_at,o.rowid FROM {table} e
+                LEFT JOIN outstanding_reviews o ON o.source=?1 AND o.source_key=?3
+                  AND o.normalized_english=e.normalized_english AND o.chinese=e.chinese
                 LEFT JOIN review_coverage c ON c.source=?1 AND c.source_id=?2
                   AND c.normalized_english=e.normalized_english AND c.chinese=e.chinese
                 LEFT JOIN review_memory zh ON zh.normalized_english=e.normalized_english
@@ -325,7 +348,7 @@ impl WordbookRepository {
                 LEFT JOIN review_memory en ON en.normalized_english=e.normalized_english
                   AND en.chinese=e.chinese AND en.direction='en-to-zh'
                 {} ORDER BY e.id", if source == "wordbook" { "WHERE e.wordbook_id=?2" } else { "" });
-            let mut candidates: Vec<Candidate> = tx.prepare(&sql)?.query_map(params![source,source_id], |row| {
+            let mut candidates: Vec<Candidate> = tx.prepare(&sql)?.query_map(params![source,source_id,book.as_deref().unwrap_or("")], |row| {
                 let normalized: String = row.get(3)?;
                 let chinese: String = row.get(2)?;
                 let direction = match mode {
@@ -335,27 +358,11 @@ impl WordbookRepository {
                 };
                 Ok(Candidate {
                     entry: WordEntry { id: row.get(0)?, english: row.get(1)?, chinese },
-                    normalized, covered: row.get(4)?,
+                    normalized, covered: row.get(4)?, pending_order: row.get(7)?,
                     due_at: row.get(if direction == "zh-to-en" { 5 } else { 6 })?, direction,
                 })
             })?.collect::<Result<_, _>>()?;
-            let mut unseen = Vec::new();
-            let mut due = Vec::new();
-            let mut other = Vec::new();
-            for candidate in candidates.drain(..) {
-                if !candidate.covered { unseen.push(candidate); }
-                else if candidate.due_at.is_some_and(|time| time <= now) { due.push(candidate); }
-                else { other.push(candidate); }
-            }
-            due.sort_by(|a,b| a.due_at.unwrap().total_cmp(&b.due_at.unwrap())
-                .then(a.entry.id.cmp(&b.entry.id)));
-            let capacity = usize::from(limit);
-            let reserve = usize::from(!unseen.is_empty());
-            let mut selected = Vec::with_capacity(capacity);
-            selected.extend(due.drain(..due.len().min(capacity-reserve)));
-            selected.extend(unseen.drain(..unseen.len().min(capacity-selected.len())));
-            selected.extend(due.drain(..due.len().min(capacity-selected.len())));
-            selected.extend(other.drain(..other.len().min(capacity-selected.len())));
+            let selected = select_candidates(std::mem::take(&mut candidates), usize::from(limit), now);
             let payload = LearningChange::Schedule { source: source.to_owned(), book,
                 selected: selected.iter().map(|item| Selection {
                     english: item.normalized.clone(), chinese: item.entry.chinese.clone(),
@@ -451,12 +458,12 @@ impl WordbookRepository {
         }
         let mut connection = self.connect()?;
         let transaction = connection.transaction()?;
-        let pending: Option<(String, String, String, bool)> = transaction.query_row(
-            "SELECT normalized_english, chinese, direction, completed FROM pending_reviews WHERE id = ?1",
+        let pending: Option<(String, String, String, bool, Option<String>, Option<String>)> = transaction.query_row(
+            "SELECT normalized_english, chinese, direction, completed, source, source_key FROM pending_reviews WHERE id = ?1",
             [review_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         ).optional()?;
-        let Some((english, chinese, direction, completed)) = pending else {
+        let Some((english, chinese, direction, completed, source, source_key)) = pending else {
             return Err(RepositoryError::Validation("复习记录不存在"));
         };
         if completed {
@@ -487,6 +494,47 @@ impl WordbookRepository {
                 due_at = excluded.due_at",
             params![english, chinese, direction, updated, effective_now, effective_now + curve.interval(updated)],
         )?;
+        if let (Some(source), Some(source_key)) = (source, source_key) {
+            let source_id: Option<i64> = if source == "wordbook" {
+                transaction
+                    .query_row(
+                        "SELECT id FROM wordbooks WHERE name=?1",
+                        [&source_key],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+            } else {
+                Some(0)
+            };
+            if let Some(source_id) = source_id {
+                let table = match source.as_str() {
+                    "wordbook" => "entries",
+                    "favorites" => "favorites",
+                    "mistakes" => "mistakes",
+                    _ => "",
+                };
+                if !table.is_empty() {
+                    let membership = format!("SELECT EXISTS(SELECT 1 FROM {table} WHERE normalized_english=?1 AND chinese=?2 {})",
+                        if source == "wordbook" { "AND wordbook_id=?3" } else { "AND ?3=0" });
+                    let present: bool = transaction.query_row(
+                        &membership,
+                        params![english, chinese, source_id],
+                        |r| r.get(0),
+                    )?;
+                    if present {
+                        transaction.execute(
+                            "INSERT OR IGNORE INTO review_coverage VALUES (?1,?2,?3,?4)",
+                            params![source, source_id, english, chinese],
+                        )?;
+                    }
+                }
+            }
+            transaction.execute(
+                "DELETE FROM outstanding_reviews WHERE source=?1 AND source_key=?2
+                AND normalized_english=?3 AND chinese=?4 AND token_id=?5",
+                params![source, source_key, english, chinese, review_id],
+            )?;
+        }
         transaction.execute(
             "UPDATE pending_reviews SET completed = 1 WHERE id = ?1",
             [review_id],
@@ -783,7 +831,10 @@ mod tests {
         assert_eq!(book.id, original.id);
         b.add_favorite("apple", "苹果").unwrap();
         b.add_favorite("apple", "水果").unwrap();
-        b.schedule_at("favorites", None, 1, "en-to-zh", 99.0, |_, _| false)
+        let favorite_question = b
+            .schedule_at("favorites", None, 1, "en-to-zh", 99.0, |_, _| false)
+            .unwrap();
+        b.complete_at(favorite_question[0].review_id, 0, 0, false, 99.0)
             .unwrap();
         let questions = a
             .schedule_at("wordbook", Some(book.id), 2, "zh-to-en", 100.0, |_, _| {
@@ -796,6 +847,12 @@ mod tests {
             .unwrap();
         a.complete_at(skipped.review_id, 0, 0, true, 101.0).unwrap();
         a.record_mistake_once("Apple", "水果", "exam:blank")
+            .unwrap();
+        let completed_other = questions
+            .iter()
+            .find(|q| q.entry.chinese == "水果")
+            .unwrap();
+        a.complete_at(completed_other.review_id, 1, 0, false, 101.0)
             .unwrap();
         b.record_mistake_once("apple", "苹果", "exam:wrong")
             .unwrap();
@@ -841,8 +898,8 @@ mod tests {
             memory(&a, "apple", "苹果", "zh-to-en"),
             memory(&b, "apple", "苹果", "zh-to-en")
         );
-        assert!(memory(&a, "apple", "水果", "zh-to-en").is_none());
-        assert!(memory(&a, "apple", "苹果", "en-to-zh").is_none());
+        assert!(memory(&a, "apple", "水果", "zh-to-en").is_some());
+        assert!(memory(&a, "apple", "苹果", "en-to-zh").is_some());
         assert_eq!(a.list_mistakes().unwrap()[0].error_count, 1);
     }
 
@@ -1248,7 +1305,20 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(covered, 1);
+        assert_eq!(covered, 0);
+        repo.complete_at(other_source[0].review_id, 0, 0, false, 101.0)
+            .unwrap();
+        assert_eq!(
+            repo.connect()
+                .unwrap()
+                .query_row(
+                    "SELECT COUNT(*) FROM review_coverage WHERE source='wordbook' AND source_id=?1",
+                    [second.id],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
         // All words in the first source are already covered but not yet due.
         let active = repo
             .schedule_at(
@@ -1395,6 +1465,303 @@ mod tests {
                 "reviewId": 42, "entry": {"id": 7, "english": "apple", "chinese": "苹果"}, "direction": "zh-to-en"
             })
         );
+    }
+
+    fn coverage(repo: &WordbookRepository, source: &str, id: i64) -> i64 {
+        repo.connect()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM review_coverage WHERE source=?1 AND source_id=?2",
+                params![source, id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn unfinished_round_precedes_due_and_new_even_after_reopen_and_capacity_reduction() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("db");
+        let repo = WordbookRepository::open(&path).unwrap();
+        let book = repo.replace("book", &words(6), false).unwrap();
+        let first = repo
+            .schedule_at("wordbook", Some(book.id), 3, "zh-to-en", 100.0, |_, _| {
+                false
+            })
+            .unwrap();
+        assert_eq!(
+            coverage(&repo, "wordbook", book.id),
+            0,
+            "selection is not completion"
+        );
+        assert!(first.iter().all(|q| memory(
+            &repo,
+            &q.entry.english,
+            &q.entry.chinese,
+            "zh-to-en"
+        )
+        .is_none()));
+        // The first answer is finished; the other two were abandoned, including an unseen question.
+        repo.complete_at(first[0].review_id, 0, 0, false, 100.0)
+            .unwrap();
+        assert_eq!(coverage(&repo, "wordbook", book.id), 1);
+        let repeat = repo
+            .schedule_at("wordbook", Some(book.id), 3, "zh-to-en", 101.0, |_, _| {
+                false
+            })
+            .unwrap();
+        // An already covered repeat can itself be abandoned and must retain priority.
+        assert_eq!(repeat[0].entry.id, first[1].entry.id);
+        assert_eq!(repeat[1].entry.id, first[2].entry.id);
+        let covered_repeat = repo
+            .schedule_at(
+                "wordbook",
+                Some(book.id),
+                6,
+                "zh-to-en",
+                1_000_000.0,
+                |_, _| false,
+            )
+            .unwrap();
+        assert!(covered_repeat
+            .iter()
+            .any(|q| q.entry.id == first[0].entry.id));
+        drop(repo);
+        let repo = WordbookRepository::open(&path).unwrap();
+        let limited = repo
+            .schedule_at(
+                "wordbook",
+                Some(book.id),
+                2,
+                "zh-to-en",
+                1_000_001.0,
+                |_, _| false,
+            )
+            .unwrap();
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited[0].entry.id, first[1].entry.id);
+        assert_eq!(limited[1].entry.id, first[2].entry.id);
+        assert_eq!(coverage(&repo, "wordbook", book.id), 1);
+        let remaining = repo
+            .schedule_at(
+                "wordbook",
+                Some(book.id),
+                6,
+                "zh-to-en",
+                1_000_002.0,
+                |_, _| false,
+            )
+            .unwrap();
+        assert_eq!(remaining.len(), 6);
+        assert_eq!(
+            remaining
+                .iter()
+                .map(|q| q.entry.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            6
+        );
+        assert_eq!(coverage(&repo, "wordbook", book.id), 1);
+        assert!(first[1..].iter().all(|q| memory(
+            &repo,
+            &q.entry.english,
+            &q.entry.chinese,
+            "zh-to-en"
+        )
+        .is_none()));
+    }
+
+    #[test]
+    fn abandoned_covered_repeat_outranks_new_members_when_capacity_is_small() {
+        let dir = tempdir().unwrap();
+        let repo = WordbookRepository::open(dir.path().join("db")).unwrap();
+        let book = repo.replace("book", &words(4), false).unwrap();
+        let original = repo
+            .schedule_at("wordbook", Some(book.id), 1, "zh-to-en", 100.0, |_, _| {
+                false
+            })
+            .unwrap();
+        repo.complete_at(original[0].review_id, 0, 0, false, 100.0)
+            .unwrap();
+        let round = repo
+            .schedule_at(
+                "wordbook",
+                Some(book.id),
+                4,
+                "zh-to-en",
+                1_000_000.0,
+                |_, _| false,
+            )
+            .unwrap();
+        let covered = round
+            .iter()
+            .find(|q| q.entry.id == original[0].entry.id)
+            .unwrap();
+        for question in round
+            .iter()
+            .filter(|q| q.entry.id != covered.entry.id)
+            .take(2)
+        {
+            repo.complete_at(question.review_id, 0, 0, false, 1_000_000.0)
+                .unwrap();
+        }
+        let unfinished_new = round
+            .iter()
+            .find(|q| {
+                q.entry.id != covered.entry.id
+                    && memory(&repo, &q.entry.english, &q.entry.chinese, "zh-to-en").is_none()
+            })
+            .unwrap();
+        assert_eq!(coverage(&repo, "wordbook", book.id), 3);
+        let limited = repo
+            .schedule_at(
+                "wordbook",
+                Some(book.id),
+                2,
+                "zh-to-en",
+                1_000_001.0,
+                |_, _| false,
+            )
+            .unwrap();
+        assert_eq!(limited.len(), 2);
+        assert_eq!(limited.iter().map(|q| q.entry.id).collect::<std::collections::HashSet<_>>(),
+            [unfinished_new.entry.id, covered.entry.id].into_iter().collect(),
+            "unfinished covered repeat and unfinished unseen both precede non-outstanding candidates");
+    }
+
+    #[test]
+    fn completion_alone_updates_coverage_memory_and_is_idempotent_per_source() {
+        let dir = tempdir().unwrap();
+        let repo = WordbookRepository::open(dir.path().join("db")).unwrap();
+        let book = repo.replace("book", &words(1), false).unwrap();
+        repo.add_favorite("word-0", "释义-0").unwrap();
+        repo.record_mistake("word-0", "释义-0").unwrap();
+        let word = repo
+            .schedule_at("wordbook", Some(book.id), 1, "zh-to-en", 100.0, |_, _| {
+                false
+            })
+            .unwrap();
+        let favorite = repo
+            .schedule_at("favorites", None, 1, "zh-to-en", 101.0, |_, _| false)
+            .unwrap();
+        let mistake = repo
+            .schedule_at("mistakes", None, 1, "en-to-zh", 102.0, |_, _| false)
+            .unwrap();
+        for (source, id) in [("wordbook", book.id), ("favorites", 0), ("mistakes", 0)] {
+            assert_eq!(
+                coverage(&repo, source, id),
+                0,
+                "{source} scheduled without completion"
+            );
+        }
+        assert!(memory(&repo, "word-0", "释义-0", "zh-to-en").is_none());
+        repo.complete_at(word[0].review_id, 1, 0, false, 103.0)
+            .unwrap();
+        let state = memory(&repo, "word-0", "释义-0", "zh-to-en");
+        repo.complete_at(word[0].review_id, 0, 0, false, 200.0)
+            .unwrap();
+        assert_eq!(memory(&repo, "word-0", "释义-0", "zh-to-en"), state);
+        assert_eq!(coverage(&repo, "wordbook", book.id), 1);
+        assert_eq!(coverage(&repo, "favorites", 0), 0);
+        assert_eq!(coverage(&repo, "mistakes", 0), 0);
+        repo.complete_at(mistake[0].review_id, 0, 3, true, 104.0)
+            .unwrap();
+        assert_eq!(coverage(&repo, "mistakes", 0), 1);
+        assert!(memory(&repo, "word-0", "释义-0", "en-to-zh").is_some());
+        assert_eq!(repo.list_mistakes().unwrap()[0].error_count, 1);
+        repo.complete_at(favorite[0].review_id, 0, 0, false, 105.0)
+            .unwrap();
+        assert_eq!(coverage(&repo, "favorites", 0), 1);
+    }
+
+    #[test]
+    fn replay_and_peer_transfer_keep_unfinished_outstanding_without_covering_it() {
+        use std::collections::BTreeMap;
+        let dir = tempdir().unwrap();
+        let a = WordbookRepository::open(dir.path().join("a")).unwrap();
+        let b = WordbookRepository::open(dir.path().join("b")).unwrap();
+        for word in ["a", "b", "c"] {
+            a.add_favorite(word, word).unwrap();
+        }
+        let selected = a
+            .schedule_at("favorites", None, 2, "zh-to-en", 100.0, |_, _| false)
+            .unwrap();
+        a.complete_at(selected[0].review_id, 0, 0, false, 101.0)
+            .unwrap();
+        for change in a.changes_since(&BTreeMap::new(), 100).unwrap().iter().rev() {
+            b.ingest(change, &super::super::SyncProjection).unwrap();
+        }
+        assert_eq!(coverage(&a, "favorites", 0), 1);
+        assert_eq!(coverage(&b, "favorites", 0), 1);
+        assert!(memory(
+            &b,
+            &selected[1].entry.english,
+            &selected[1].entry.chinese,
+            "zh-to-en"
+        )
+        .is_none());
+        for repo in [&a, &b] {
+            let next = repo
+                .schedule_at("favorites", None, 1, "zh-to-en", 102.0, |_, _| false)
+                .unwrap();
+            assert_eq!(next[0].entry.english, selected[1].entry.english);
+            assert_eq!(coverage(repo, "favorites", 0), 1);
+        }
+    }
+
+    #[test]
+    fn peers_share_one_pending_word_and_old_completion_keeps_newer_assignment() {
+        use std::collections::BTreeMap;
+        let dir = tempdir().unwrap();
+        let a = WordbookRepository::open(dir.path().join("a")).unwrap();
+        let b = WordbookRepository::open(dir.path().join("b")).unwrap();
+        a.add_favorite("apple", "苹果").unwrap();
+        for change in a.changes_since(&BTreeMap::new(), 100).unwrap() {
+            b.ingest(&change, &super::super::SyncProjection).unwrap();
+        }
+        let older = a
+            .schedule_at("favorites", None, 1, "zh-to-en", 100.0, |_, _| false)
+            .unwrap()[0]
+            .review_id;
+        for change in a.changes_since(&BTreeMap::new(), 100).unwrap() {
+            b.ingest(&change, &super::super::SyncProjection).unwrap();
+        }
+        let newer = b
+            .schedule_at("favorites", None, 1, "zh-to-en", 101.0, |_, _| false)
+            .unwrap()[0]
+            .review_id;
+        for change in b.changes_since(&BTreeMap::new(), 100).unwrap().iter().rev() {
+            a.ingest(change, &super::super::SyncProjection).unwrap();
+        }
+        let outstanding = |repo: &WordbookRepository| -> i64 {
+            repo.connect().unwrap().query_row(
+                "SELECT COUNT(*) FROM outstanding_reviews WHERE source='favorites' AND normalized_english='apple' AND chinese='苹果'",
+                [], |row| row.get(0),
+            ).unwrap()
+        };
+        assert_eq!(outstanding(&a), 1);
+        assert_eq!(outstanding(&b), 1);
+        a.complete_at(older, 1, 0, false, 102.0).unwrap();
+        for change in a.changes_since(&BTreeMap::new(), 100).unwrap().iter().rev() {
+            b.ingest(change, &super::super::SyncProjection).unwrap();
+        }
+        for repo in [&a, &b] {
+            assert_eq!(coverage(repo, "favorites", 0), 1);
+            assert_eq!(
+                outstanding(repo),
+                1,
+                "older completion must not clear newer pending word"
+            );
+        }
+        b.complete_at(newer, 0, 0, false, 103.0).unwrap();
+        for change in b.changes_since(&BTreeMap::new(), 100).unwrap().iter().rev() {
+            a.ingest(change, &super::super::SyncProjection).unwrap();
+        }
+        for repo in [&a, &b] {
+            assert_eq!(outstanding(repo), 0);
+            assert_eq!(coverage(repo, "favorites", 0), 1);
+            assert!(memory(repo, "apple", "苹果", "zh-to-en").is_some());
+        }
     }
 
     #[test]

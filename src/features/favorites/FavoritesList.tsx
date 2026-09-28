@@ -4,6 +4,7 @@ import { List, ListItem } from "@astryxdesign/core/List";
 import { Section } from "@astryxdesign/core/Section";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
+import type { CSSProperties } from "react";
 import type { WordEntry } from "../../domain/word";
 
 type FavoritesListProps = {
@@ -55,7 +56,21 @@ export function FavoritesList({
                 <ListItem
                   key={entry.id}
                   label={entry.english}
-                  description={entry.chinese}
+                  style={
+                    {
+                      "--text-body-size": "var(--font-size-xl)",
+                    } as CSSProperties
+                  }
+                  description={
+                    <Text
+                      type="large"
+                      weight="normal"
+                      color="secondary"
+                      wordBreak="break-word"
+                    >
+                      {entry.chinese}
+                    </Text>
+                  }
                   endContent={
                     <Button
                       label={`移除 ${entry.english}：${entry.chinese}`}

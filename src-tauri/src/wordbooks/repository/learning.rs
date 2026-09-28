@@ -148,8 +148,10 @@ impl Projection for LearningProjection {
     fn reset(&self, tx: &Transaction<'_>) -> Result<(), ReplayError> {
         tx.execute_batch(
             "DELETE FROM sync_submissions; DELETE FROM sync_completions;
+            DELETE FROM outstanding_reviews WHERE origin_device IS NOT NULL;
             DELETE FROM mistakes; DELETE FROM mistake_submissions;
             DELETE FROM review_coverage; DELETE FROM review_memory;
+            INSERT OR IGNORE INTO review_coverage SELECT * FROM review_legacy_coverage;
             UPDATE review_settings SET target_retention=0.9 WHERE id=1;
             UPDATE pending_reviews SET completed=0 WHERE origin_device IS NOT NULL;",
         )?;
@@ -205,42 +207,23 @@ impl Projection for LearningProjection {
                 book,
                 selected,
             } => {
-                let source_id = if let Some(book) = book {
-                    tx.query_row("SELECT id FROM sync_book_ids WHERE name=?1", [book], |r| {
-                        r.get::<_, i64>(0)
-                    })
-                    .optional()?
-                    .unwrap_or(-1)
-                } else {
-                    0
-                };
-                // A concurrent content deletion may precede this schedule in canonical order.
-                // Only coverage requires present membership; the original learning outcome
-                // remains valid for its normalized pair even if the source is now gone.
+                let source_key = book.as_deref().unwrap_or("");
                 for (index, item) in selected.iter().enumerate() {
-                    // Coverage belongs only to a currently present source.
-                    let present: bool = match source.as_str() {
-                        "wordbook" => tx.query_row("SELECT EXISTS(SELECT 1 FROM entries WHERE wordbook_id=?1 AND normalized_english=?2 AND chinese=?3)",
-                            params![source_id,item.english,item.chinese], |r| r.get(0))?,
-                        "favorites" => tx.query_row("SELECT EXISTS(SELECT 1 FROM favorites WHERE normalized_english=?1 AND chinese=?2)",
-                            params![item.english,item.chinese], |r| r.get(0))?,
-                        _ => tx.query_row("SELECT EXISTS(SELECT 1 FROM mistakes WHERE normalized_english=?1 AND chinese=?2)",
-                            params![item.english,item.chinese], |r| r.get(0))?,
-                    };
-                    if present {
-                        tx.execute(
-                            "INSERT OR IGNORE INTO review_coverage VALUES (?1,?2,?3,?4)",
-                            params![source, source_id, item.english, item.chinese],
-                        )?;
-                    }
+                    tx.execute("INSERT INTO outstanding_reviews(source,source_key,normalized_english,chinese,
+                        origin_device,origin_sequence,origin_index) VALUES (?1,?2,?3,?4,?5,?6,?7)
+                        ON CONFLICT(source,source_key,normalized_english,chinese) DO UPDATE SET
+                        token_id=NULL,origin_device=excluded.origin_device,
+                        origin_sequence=excluded.origin_sequence,origin_index=excluded.origin_index",
+                        params![source,source_key,item.english,item.chinese,
+                            change.id.device.0,change.id.sequence as i64,index as i64])?;
                     // Remote tokens are never exported as local review IDs.
                     if change.id.device.0 == local_device(tx)? && !tx.query_row(
                         "SELECT EXISTS(SELECT 1 FROM sync_retired_reviews WHERE device=?1 AND sequence=?2 AND item_index=?3)",
                         params![change.id.device.0,change.id.sequence as i64,index as i64], |r| r.get::<_, bool>(0))? {
-                        tx.execute("INSERT OR IGNORE INTO pending_reviews(normalized_english,chinese,direction,created_at,origin_device,origin_sequence,origin_index)
-                            VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                        tx.execute("INSERT OR IGNORE INTO pending_reviews(normalized_english,chinese,direction,created_at,origin_device,origin_sequence,origin_index,source,source_key)
+                            VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
                             params![item.english,item.chinese,item.direction,change.occurred_at.unwrap() as f64 / 1000.0,
-                                change.id.device.0, change.id.sequence as i64,index as i64])?;
+                                change.id.device.0, change.id.sequence as i64,index as i64,source,source_key])?;
                     }
                 }
             }
@@ -258,7 +241,11 @@ impl Projection for LearningProjection {
                 let Some(parent) = parent else {
                     return Err(ReplayError::BusinessConflict);
                 };
-                let LearningChange::Schedule { selected, .. } = LearningChange::decode(&parent)?
+                let LearningChange::Schedule {
+                    source,
+                    book,
+                    selected,
+                } = LearningChange::decode(&parent)?
                 else {
                     return Err(ReplayError::BusinessConflict);
                 };
@@ -272,6 +259,47 @@ impl Projection for LearningProjection {
                 {
                     return Ok(());
                 }
+                let source_key = book.as_deref().unwrap_or("");
+                let source_id: Option<i64> = if source == "wordbook" {
+                    tx.query_row(
+                        "SELECT id FROM sync_book_ids WHERE name=?1",
+                        [source_key],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                } else {
+                    Some(0)
+                };
+                if let Some(source_id) = source_id {
+                    let present: bool = match source.as_str() {
+                        "wordbook" => tx.query_row("SELECT EXISTS(SELECT 1 FROM entries WHERE wordbook_id=?1 AND normalized_english=?2 AND chinese=?3)",
+                            params![source_id,item.english,item.chinese], |r| r.get(0))?,
+                        "favorites" => tx.query_row("SELECT EXISTS(SELECT 1 FROM favorites WHERE normalized_english=?1 AND chinese=?2)",
+                            params![item.english,item.chinese], |r| r.get(0))?,
+                        _ => tx.query_row("SELECT EXISTS(SELECT 1 FROM mistakes WHERE normalized_english=?1 AND chinese=?2)",
+                            params![item.english,item.chinese], |r| r.get(0))?,
+                    };
+                    if present {
+                        tx.execute(
+                            "INSERT OR IGNORE INTO review_coverage VALUES (?1,?2,?3,?4)",
+                            params![source, source_id, item.english, item.chinese],
+                        )?;
+                    }
+                }
+                tx.execute(
+                    "DELETE FROM outstanding_reviews WHERE source=?1 AND source_key=?2
+                    AND normalized_english=?3 AND chinese=?4 AND origin_device=?5
+                    AND origin_sequence=?6 AND origin_index=?7",
+                    params![
+                        source,
+                        source_key,
+                        item.english,
+                        item.chinese,
+                        schedule.device.0,
+                        schedule.sequence as i64,
+                        index as i64
+                    ],
+                )?;
                 let previous: Option<(f64,f64)> = tx.query_row("SELECT stability,last_reviewed FROM review_memory WHERE normalized_english=?1 AND chinese=?2 AND direction=?3",
                     params![item.english,item.chinese,item.direction], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
                 let target: f64 = tx.query_row(
