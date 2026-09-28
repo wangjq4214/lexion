@@ -41,11 +41,15 @@ pub struct PendingView {
     pub id: String,
     pub name: String,
     pub code: String,
+    pub peer_id: String,
+    pub confirmed: bool,
 }
 #[derive(Clone, Serialize)]
 pub struct TrustedView {
     pub id: String,
     pub name: String,
+    pub peer_id: String,
+    pub authenticated: bool,
 }
 #[derive(Serialize)]
 pub struct LanStatus {
@@ -73,6 +77,7 @@ struct Pending {
     name: String,
     code: String,
     decision: Option<bool>,
+    peer_id: String,
     expires: Instant,
 }
 struct Shared {
@@ -308,15 +313,22 @@ impl LanService {
                 id: id.clone(),
                 name: p.name.clone(),
                 code: p.code.clone(),
+                peer_id: p.peer_id.clone(),
+                confirmed: p.decision == Some(true),
             })
             .collect();
         pending.sort_by(|a, b| a.id.cmp(&b.id));
         let mut trusted: Vec<_> = state
             .trusted
             .iter()
-            .map(|(id, name)| TrustedView {
-                id: id.clone(),
-                name: name.clone(),
+            .map(|(id, name)| {
+                let peer_id = identity_id(&hex::decode(id).expect("validated trust key"));
+                TrustedView {
+                    id: id.clone(),
+                    name: name.clone(),
+                    authenticated: state.authenticated.contains(&peer_id),
+                    peer_id,
+                }
             })
             .collect();
         trusted.sort_by(|a, b| a.id.cmp(&b.id));
@@ -485,7 +497,11 @@ impl LanService {
                     Ok(stream) => {
                         let owner = owner.clone();
                         thread::spawn(move || {
-                            let _ = owner.session(stream, false, None);
+                            if let Err(error) = owner.session(stream, false, None) {
+                                if error.starts_with("Pairing decision: ") {
+                                    owner.state.lock().unwrap().error = Some(error);
+                                }
+                            }
                         });
                     }
                     Err(e) => {
@@ -509,6 +525,7 @@ impl LanService {
         let addresses = peer.addresses;
         let expected = peer_id.to_string();
         let owner = self.clone();
+        self.state.lock().unwrap().error = None;
         thread::spawn(move || {
             let mut last_error = "No reachable address".to_string();
             for address in addresses {
@@ -534,7 +551,7 @@ impl LanService {
         });
         Ok(())
     }
-    fn decide(&self, id: &str, code: Option<&str>) -> Result<()> {
+    fn decide(&self, id: &str, approve: bool) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let pending = state
             .pending
@@ -543,7 +560,7 @@ impl LanService {
         if pending.expires <= Instant::now() {
             return Err("Pairing expired".into());
         }
-        if code.is_none() {
+        if !approve {
             // A user may withdraw consent while waiting for the remote confirmation.
             pending.decision = Some(false);
             return Ok(());
@@ -551,10 +568,9 @@ impl LanService {
         if pending.decision.is_some() {
             return Err("Pairing already decided".into());
         }
-        pending.decision = Some(code == Some(pending.code.as_str()));
-        if pending.decision == Some(false) {
-            return Err("Pairing code does not match; request cancelled".into());
-        }
+        // The human compares the displayed Noise transcript codes on both screens.
+        // This approval is local consent, not an automatic check of the remote screen.
+        pending.decision = Some(true);
         Ok(())
     }
     #[cfg(test)]
@@ -719,15 +735,20 @@ impl LanService {
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|e| e.to_string())?;
         let request_id = hex::encode(random);
-        self.state.lock().unwrap().pending.insert(
-            request_id.clone(),
-            Pending {
-                name,
-                code,
-                decision: None,
-                expires: Instant::now() + TIMEOUT,
-            },
-        );
+        {
+            let mut state = self.state.lock().unwrap();
+            state.error = None;
+            state.pending.insert(
+                request_id.clone(),
+                Pending {
+                    name,
+                    code,
+                    peer_id: peer_id.clone(),
+                    decision: None,
+                    expires: Instant::now() + TIMEOUT,
+                },
+            );
+        }
         let result = self.finish_pairing(&request_id, &remote, epoch, &mut stream, &mut transport);
         self.state.lock().unwrap().pending.remove(&request_id);
         result.map_err(|e| format!("Pairing decision: {e}"))?;
@@ -1388,12 +1409,12 @@ pub fn lan_pair(backend: State<'_, LanBackend>, peer_id: String) -> Result<()> {
     backend.service()?.pair(&peer_id)
 }
 #[tauri::command]
-pub fn lan_confirm(backend: State<'_, LanBackend>, id: String, code: String) -> Result<()> {
-    backend.service()?.decide(&id, Some(&code))
+pub fn lan_confirm(backend: State<'_, LanBackend>, id: String) -> Result<()> {
+    backend.service()?.decide(&id, true)
 }
 #[tauri::command]
 pub fn lan_cancel(backend: State<'_, LanBackend>, id: String) -> Result<()> {
-    backend.service()?.decide(&id, None)
+    backend.service()?.decide(&id, false)
 }
 
 #[tauri::command]
@@ -1615,6 +1636,7 @@ mod tests {
         let a = LanService::open(a_dir.path()).unwrap();
         let b = LanService::open(b_dir.path()).unwrap();
         a.trust(&snow_public(&b.key).unwrap(), "B").unwrap();
+        assert!(!a.status().trusted[0].authenticated);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let responder = {
@@ -1636,8 +1658,8 @@ mod tests {
         let a_pending = &a.status().pending[0];
         let b_pending = &b.status().pending[0];
         assert_eq!(a_pending.code, b_pending.code);
-        a.decide(&a_pending.id, Some(&a_pending.code)).unwrap();
-        b.decide(&b_pending.id, Some(&b_pending.code)).unwrap();
+        a.decide(&a_pending.id, true).unwrap();
+        b.decide(&b_pending.id, true).unwrap();
         let initiator = initiator.join().unwrap();
         assert!(initiator.is_ok(), "{initiator:?}");
         let responder = responder.join().unwrap();
@@ -1683,14 +1705,19 @@ mod tests {
         let a_pending = &a.status().pending[0];
         let b_pending = &b.status().pending[0];
         assert_eq!(a_pending.code, b_pending.code);
-        a.decide(&a_pending.id, Some(&a_pending.code)).unwrap();
+        a.decide(&a_pending.id, true).unwrap();
+        assert!(a.status().pending[0].confirmed);
+        assert!(!b.status().pending[0].confirmed);
+        assert_eq!(a.status().pending[0].peer_id, b.local_id);
         thread::sleep(Duration::from_millis(100));
         assert!(a.status().trusted.is_empty());
         assert!(b.status().trusted.is_empty());
-        b.decide(&b_pending.id, Some(&b_pending.code)).unwrap();
+        b.decide(&b_pending.id, true).unwrap();
         assert!(initiator.join().unwrap().is_ok());
         assert!(responder.join().unwrap().is_ok());
         assert_eq!(a.status().trusted.len(), 1);
+        assert_eq!(a.status().trusted[0].peer_id, b.local_id);
+        assert!(a.status().trusted[0].authenticated);
         assert_eq!(b.status().trusted.len(), 1);
         // A remembered, directly trusted key reconnects without another pending code.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1749,8 +1776,8 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         let pending = &a.status().pending[0];
-        a.decide(&pending.id, Some(&pending.code)).unwrap();
-        a.decide(&pending.id, None).unwrap();
+        a.decide(&pending.id, true).unwrap();
+        a.decide(&pending.id, false).unwrap();
         assert!(initiator.join().unwrap().is_err());
         assert!(responder.join().unwrap().is_err());
         assert!(a.status().pending.is_empty() && b.status().pending.is_empty());
@@ -1789,8 +1816,8 @@ mod tests {
         }
         let ap = &a.status().pending[0];
         let bp = &b.status().pending[0];
-        a.decide(&ap.id, Some(&ap.code)).unwrap();
-        b.decide(&bp.id, Some(&bp.code)).unwrap();
+        a.decide(&ap.id, true).unwrap();
+        b.decide(&bp.id, true).unwrap();
         stale_thread.join().unwrap();
         let responder = responder.join().unwrap();
         assert!(responder.is_ok(), "{responder:?}");
@@ -1810,12 +1837,13 @@ mod tests {
             Pending {
                 name: "B".into(),
                 code: "12345678".into(),
+                peer_id: "peer-b".into(),
                 decision: None,
                 expires: Instant::now() + TIMEOUT,
             },
         );
-        service.decide("request", Some("12345678")).unwrap();
-        service.decide("request", None).unwrap();
+        service.decide("request", true).unwrap();
+        service.decide("request", false).unwrap();
         assert_eq!(
             service.state.lock().unwrap().pending["request"].decision,
             Some(false)
@@ -1893,8 +1921,8 @@ mod tests {
         let ap = &a.status().pending[0];
         let bp = &b.status().pending[0];
         assert_eq!(ap.code, bp.code);
-        a.decide(&ap.id, Some(&ap.code)).unwrap();
-        b.decide(&bp.id, Some(&bp.code)).unwrap();
+        a.decide(&ap.id, true).unwrap();
+        b.decide(&bp.id, true).unwrap();
         assert!(initiator.join().unwrap().is_ok());
         assert!(responder.join().unwrap().is_ok());
         assert_eq!(ar.list_favorites().unwrap().len(), 3);
@@ -1955,8 +1983,8 @@ mod tests {
         let ap = &a.status().pending[0];
         let bp = &b.status().pending[0];
         assert_eq!(ap.code, bp.code);
-        a.decide(&ap.id, Some(&ap.code)).unwrap();
-        b.decide(&bp.id, Some(&bp.code)).unwrap();
+        a.decide(&ap.id, true).unwrap();
+        b.decide(&bp.id, true).unwrap();
         let initiator = initiator.join().unwrap();
         assert!(initiator.is_ok(), "{initiator:?}");
         let responder = responder.join().unwrap();
@@ -2238,7 +2266,7 @@ mod tests {
         assert_eq!(br.list_favorites().unwrap().len(), 2);
     }
     #[test]
-    fn mismatch_cancels() {
+    fn explicit_rejection_never_authorizes() {
         let dir = tempfile::tempdir().unwrap();
         let a = LanService::open(dir.path()).unwrap();
         a.state.lock().unwrap().pending.insert(
@@ -2246,15 +2274,35 @@ mod tests {
             Pending {
                 name: "B".into(),
                 code: "12345678".into(),
+                peer_id: "peer-b".into(),
                 decision: None,
                 expires: Instant::now() + TIMEOUT,
             },
         );
-        assert!(a.decide("request", Some("87654321")).is_err());
+        a.decide("request", false).unwrap();
         assert_eq!(
             a.state.lock().unwrap().pending["request"].decision,
             Some(false)
         );
+        assert!(a.decide("request", true).is_err());
+        assert!(a.status().trusted.is_empty());
+    }
+    #[test]
+    fn expired_pairing_cannot_be_confirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = LanService::open(dir.path()).unwrap();
+        a.state.lock().unwrap().pending.insert(
+            "expired".into(),
+            Pending {
+                name: "B".into(),
+                code: "12345678".into(),
+                peer_id: "peer-b".into(),
+                decision: None,
+                expires: Instant::now() - Duration::from_secs(1),
+            },
+        );
+        assert!(a.status().pending.is_empty());
+        assert_eq!(a.decide("expired", true).unwrap_err(), "Pairing expired");
         assert!(a.status().trusted.is_empty());
     }
 }

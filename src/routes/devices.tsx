@@ -4,11 +4,11 @@ import { Heading } from "@astryxdesign/core/Heading";
 import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
 import { List, ListItem } from "@astryxdesign/core/List";
 import { Section } from "@astryxdesign/core/Section";
+import { Spinner } from "@astryxdesign/core/Spinner";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
-import { TextInput } from "@astryxdesign/core/TextInput";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type LanStatus, lanService, type TrustedPeer } from "../data/lan";
 
 function DevicesPage() {
@@ -17,14 +17,43 @@ function DevicesPage() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [codes, setCodes] = useState<Record<string, string>>({});
+  const [pairingTarget, setPairingTarget] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
+  const [pairingNotice, setPairingNotice] = useState<string | null>(null);
   const [removeTarget, setRemoveTarget] = useState<TrustedPeer | null>(null);
+  const statusRequest = useRef(0);
+  const appliedStatusRequest = useRef(0);
+  const startingPair = useRef(false);
   const refresh = useCallback(async () => {
+    const request = ++statusRequest.current;
     try {
-      setStatus(await lanService.status());
+      const latest = await lanService.status();
+      // Accept a completed response while newer requests are still in flight.
+      // Starting a new pairing raises the floor so earlier responses cannot leak in.
+      if (request <= appliedStatusRequest.current || startingPair.current)
+        return;
+      appliedStatusRequest.current = request;
+      setStatus(latest);
+      setPairingTarget((current) =>
+        current &&
+        (latest.pending.some((pending) => pending.peer_id === current.id) ||
+          latest.trusted.some(
+            (trusted) =>
+              trusted.peer_id === current.id && trusted.authenticated,
+          ) ||
+          latest.error)
+          ? null
+          : current,
+      );
       setLoadError(null);
     } catch (error) {
+      if (request <= appliedStatusRequest.current || startingPair.current)
+        return;
+      appliedStatusRequest.current = request;
       setLoadError(error instanceof Error ? error.message : String(error));
+      setPairingTarget(null);
     }
   }, []);
   useEffect(() => {
@@ -43,6 +72,7 @@ function DevicesPage() {
       await refresh();
     } catch (error) {
       setActionError(error instanceof Error ? error.message : String(error));
+      setPairingTarget(null);
     } finally {
       setBusy(false);
     }
@@ -61,7 +91,7 @@ function DevicesPage() {
         </Stack>
       </Section>
       <Text color="secondary">
-        首次配对请在两台设备上核对相同的八位数字，并分别输入对方屏幕上的数字确认。仅已配对设备可直接连接；配对后会自动交换彼此已生效的学习变更，包括从其他设备同步的变更。请只与自己的设备配对。
+        首次配对请核对两台设备屏幕上的八位数字一致，并在两端分别点击确认，无需输入数字。仅已配对设备可直接连接；配对后会自动交换彼此已生效的学习变更，包括从其他设备同步的变更。请只与自己的设备配对。
       </Text>
       {loadError ? <Text role="alert">连接服务失败：{loadError}</Text> : null}
       {actionError ? (
@@ -69,9 +99,10 @@ function DevicesPage() {
       ) : null}
       {status?.error ? (
         <Text role="alert">
-          局域网不可用：{status.error}。本地学习不受影响。
+          配对或局域网连接状态：{status.error}。本地学习不受影响。
         </Text>
       ) : null}
+      {pairingNotice ? <Text role="status">{pairingNotice}</Text> : null}
       <Section>
         <Stack gap={3}>
           <Stack direction="horizontal" justify="between" gap={2} wrap="wrap">
@@ -103,8 +134,34 @@ function DevicesPage() {
                         label={`与 ${peer.name} 建立配对`}
                         size="sm"
                         variant="secondary"
-                        isDisabled={busy}
-                        onClick={() => void act(() => lanService.pair(peer.id))}
+                        isDisabled={
+                          busy ||
+                          pairingTarget !== null ||
+                          status.pending.some(
+                            (request) => request.peer_id === peer.id,
+                          )
+                        }
+                        onClick={() => {
+                          statusRequest.current += 1;
+                          appliedStatusRequest.current = statusRequest.current;
+                          startingPair.current = true;
+                          setPairingNotice(null);
+                          setActionError(null);
+                          setStatus((current) =>
+                            current ? { ...current, error: null } : current,
+                          );
+                          setPairingTarget({ id: peer.id, name: peer.name });
+                          void act(async () => {
+                            try {
+                              await lanService.pair(peer.id);
+                            } finally {
+                              startingPair.current = false;
+                              statusRequest.current += 1;
+                              appliedStatusRequest.current =
+                                statusRequest.current;
+                            }
+                          });
+                        }}
                       />
                     )
                   }
@@ -126,38 +183,30 @@ function DevicesPage() {
                   <Text color="secondary">
                     请口头核对对方屏幕的配对码与本机一致；不一致时立即取消。
                   </Text>
-                  <TextInput
-                    label={`输入 ${request.name} 屏幕上的八位配对码`}
-                    value={codes[request.id] ?? ""}
-                    onChange={(value) =>
-                      setCodes((previous) => ({
-                        ...previous,
-                        [request.id]: value,
-                      }))
-                    }
-                  />
                   <Stack direction="horizontal" gap={2} wrap="wrap">
-                    <Button
-                      label="双方数字一致，确认配对"
-                      variant="primary"
-                      isDisabled={
-                        busy || !/^\d{8}$/.test(codes[request.id] ?? "")
-                      }
-                      onClick={() =>
-                        void act(() =>
-                          lanService.confirm(
-                            request.id,
-                            codes[request.id] ?? "",
-                          ),
-                        )
-                      }
-                    />
+                    {request.confirmed ? (
+                      <Text role="status">本机已确认，正在等待另一端确认…</Text>
+                    ) : (
+                      <Button
+                        label="两端数字一致，确认配对"
+                        variant="primary"
+                        isDisabled={busy}
+                        onClick={() =>
+                          void act(() => lanService.confirm(request.id))
+                        }
+                      />
+                    )}
                     <Button
                       label="取消配对"
                       variant="ghost"
                       isDisabled={busy}
                       onClick={() =>
-                        void act(() => lanService.cancel(request.id))
+                        void act(async () => {
+                          await lanService.cancel(request.id);
+                          setPairingNotice(
+                            `已取消与 ${request.name} 的配对请求`,
+                          );
+                        })
                       }
                     />
                   </Stack>
@@ -208,6 +257,25 @@ function DevicesPage() {
           </List>
         </Section>
       ) : null}
+      <Dialog
+        isOpen={pairingTarget !== null}
+        onOpenChange={() => {}}
+        purpose="required"
+      >
+        <Layout
+          height="auto"
+          header={
+            <DialogHeader
+              title={`正在与 ${pairingTarget?.name ?? "设备"} 配对`}
+            />
+          }
+          content={
+            <LayoutContent>
+              <Spinner label="正在连接设备并生成配对码，请稍候…" />
+            </LayoutContent>
+          }
+        />
+      </Dialog>
       <Dialog
         isOpen={removeTarget !== null}
         onOpenChange={(open) => {

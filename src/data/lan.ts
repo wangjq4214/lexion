@@ -1,8 +1,19 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export type LanPeer = { id: string; name: string; trusted: boolean };
-export type PendingPair = { id: string; name: string; code: string };
-export type TrustedPeer = { id: string; name: string };
+export type PendingPair = {
+  id: string;
+  name: string;
+  code: string;
+  peer_id: string;
+  confirmed: boolean;
+};
+export type TrustedPeer = {
+  id: string;
+  name: string;
+  peer_id: string;
+  authenticated: boolean;
+};
 export type SyncView = {
   id: string;
   state: string;
@@ -20,8 +31,7 @@ export type LanStatus = {
 export const lanService = {
   status: () => invoke<LanStatus>("lan_status"),
   pair: (peerId: string) => invoke<void>("lan_pair", { peerId }),
-  confirm: (id: string, code: string) =>
-    invoke<void>("lan_confirm", { id, code }),
+  confirm: (id: string) => invoke<void>("lan_confirm", { id }),
   cancel: (id: string) => invoke<void>("lan_cancel", { id }),
   remove: (id: string) => invoke<void>("lan_remove", { id }),
 };

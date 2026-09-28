@@ -14,15 +14,14 @@ describe("LAN command contract", () => {
     expect(invoke).toHaveBeenCalledWith("lan_status");
   });
 
-  it("passes explicit peer selection and entered code to Rust", async () => {
+  it("passes explicit peer selection and local approval without code entry", async () => {
     await lanService.pair("peer-a");
-    await lanService.confirm("session-a", "01234567");
+    await lanService.confirm("session-a");
     await lanService.cancel("session-b");
     await lanService.remove("trusted-key-b");
     expect(invoke).toHaveBeenNthCalledWith(1, "lan_pair", { peerId: "peer-a" });
     expect(invoke).toHaveBeenNthCalledWith(2, "lan_confirm", {
       id: "session-a",
-      code: "01234567",
     });
     expect(invoke).toHaveBeenNthCalledWith(3, "lan_cancel", {
       id: "session-b",
