@@ -12,6 +12,7 @@ vi.mock("../data/lan", () => ({
     pair: vi.fn(),
     confirm: vi.fn(),
     cancel: vi.fn(),
+    remove: vi.fn(),
   },
 }));
 
@@ -22,6 +23,7 @@ const wordbookService = {
 beforeEach(() => {
   vi.mocked(lanService.status).mockReset();
   vi.mocked(lanService.confirm).mockReset();
+  vi.mocked(lanService.remove).mockReset();
 });
 
 it("requires the entered peer code before allowing confirmation", async () => {
@@ -110,4 +112,76 @@ it("reports LAN unavailability without blocking local navigation", async () => {
     "本地学习不受影响",
   );
   expect(screen.getByRole("button", { name: "返回首页" })).toBeEnabled();
+});
+
+it("removes only the confirmed authorized device and explains relay behavior", async () => {
+  let trusted = [
+    { id: "key-b", name: "设备 B" },
+    { id: "key-c", name: "设备 C" },
+  ];
+  vi.mocked(lanService.status).mockImplementation(async () => ({
+    peers: [],
+    pending: [],
+    trusted,
+    error: null,
+  }));
+  vi.mocked(lanService.remove).mockImplementation(async (id) => {
+    trusted = trusted.filter((peer) => peer.id !== id);
+  });
+  render(
+    <App
+      wordbookService={wordbookService}
+      history={createMemoryHistory({ initialEntries: ["/devices"] })}
+    />,
+  );
+  const user = userEvent.setup();
+  await user.click(
+    await screen.findByRole("button", { name: "删除与 设备 B 的配对" }),
+  );
+  expect(
+    screen.getByText(/新变更仍可能经其他已配对设备间接同步/),
+  ).toBeInTheDocument();
+  expect(lanService.remove).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "保留配对" }));
+  expect(lanService.remove).not.toHaveBeenCalled();
+  await user.click(
+    screen.getByRole("button", { name: "删除与 设备 B 的配对" }),
+  );
+  await user.click(screen.getByRole("button", { name: "删除直接配对" }));
+  await waitFor(() =>
+    expect(lanService.remove).toHaveBeenCalledExactlyOnceWith("key-b"),
+  );
+  expect(
+    screen.queryByRole("button", { name: "删除与 设备 B 的配对" }),
+  ).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("button", { name: "删除与 设备 C 的配对" }),
+  ).toBeEnabled();
+});
+
+it("reports a failed removal while leaving other pairings visible", async () => {
+  vi.mocked(lanService.status).mockResolvedValue({
+    peers: [],
+    pending: [],
+    trusted: [{ id: "key-c", name: "设备 C" }],
+    error: null,
+  });
+  vi.mocked(lanService.remove).mockRejectedValue(new Error("无法保存配对记录"));
+  render(
+    <App
+      wordbookService={wordbookService}
+      history={createMemoryHistory({ initialEntries: ["/devices"] })}
+    />,
+  );
+  const user = userEvent.setup();
+  await user.click(
+    await screen.findByRole("button", { name: "删除与 设备 C 的配对" }),
+  );
+  await user.click(screen.getByRole("button", { name: "删除直接配对" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "无法保存配对记录",
+  );
+  expect(
+    screen.getByRole("button", { name: "删除与 设备 C 的配对" }),
+  ).toBeEnabled();
 });

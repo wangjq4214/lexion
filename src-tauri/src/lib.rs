@@ -48,7 +48,8 @@ pub fn run() {
             lan::lan_status,
             lan::lan_pair,
             lan::lan_confirm,
-            lan::lan_cancel
+            lan::lan_cancel,
+            lan::lan_remove
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

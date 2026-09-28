@@ -3,7 +3,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs::{self, OpenOptions},
     io::{Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     thread,
@@ -85,6 +85,26 @@ struct Shared {
     sync: HashMap<String, SyncView>,
     active_sessions: usize,
     sync_ids: HashMap<String, String>,
+    active_peers: HashMap<String, HashMap<u64, TcpStream>>,
+    next_session_id: u64,
+    revocation_epochs: HashMap<String, u64>,
+}
+struct ActivePeerSession {
+    state: Arc<Mutex<Shared>>,
+    peer_id: String,
+    session_id: u64,
+    epoch: u64,
+}
+impl Drop for ActivePeerSession {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(sessions) = state.active_peers.get_mut(&self.peer_id) {
+            sessions.remove(&self.session_id);
+            if sessions.is_empty() {
+                state.active_peers.remove(&self.peer_id);
+            }
+        }
+    }
 }
 pub struct LanService {
     local_id: String,
@@ -256,6 +276,9 @@ impl LanService {
                 sync: HashMap::new(),
                 active_sessions: 0,
                 sync_ids: trust.sync_ids,
+                active_peers: HashMap::new(),
+                next_session_id: 0,
+                revocation_epochs: HashMap::new(),
             })),
             repository,
             app,
@@ -534,8 +557,22 @@ impl LanService {
         }
         Ok(())
     }
+    #[cfg(test)]
     fn trust(&self, key: &[u8], name: &str) -> Result<()> {
+        self.trust_with_epoch(key, name, None)
+    }
+    fn trust_with_epoch(&self, key: &[u8], name: &str, epoch: Option<u64>) -> Result<()> {
         let mut state = self.state.lock().unwrap();
+        if epoch.is_some_and(|expected| {
+            state
+                .revocation_epochs
+                .get(&identity_id(key))
+                .copied()
+                .unwrap_or(0)
+                != expected
+        }) {
+            return Err("Pairing was removed during confirmation".into());
+        }
         let mut peers = state.trusted.clone();
         peers.insert(hex::encode(key), name.to_owned());
         atomic_write(
@@ -547,6 +584,38 @@ impl LanService {
             .map_err(|e| e.to_string())?,
         )?;
         state.trusted = peers;
+        Ok(())
+    }
+    fn remove(&self, key: &str) -> Result<()> {
+        let mut state = self.state.lock().unwrap();
+        if !state.trusted.contains_key(key) {
+            return Err("Device is no longer paired".into());
+        }
+        let bytes = hex::decode(key).map_err(|_| "Invalid paired device identity")?;
+        let id = identity_id(&bytes);
+        let mut peers = state.trusted.clone();
+        peers.remove(key);
+        let mut sync_ids = state.sync_ids.clone();
+        sync_ids.remove(&id);
+        atomic_write(
+            &self.trust_path,
+            &serde_json::to_vec(&TrustFile {
+                peers: peers.clone(),
+                sync_ids: sync_ids.clone(),
+            })
+            .map_err(|e| e.to_string())?,
+        )?;
+        state.trusted = peers;
+        state.sync_ids = sync_ids;
+        *state.revocation_epochs.entry(id.clone()).or_default() += 1;
+        state.authenticated.remove(&id);
+        state.reconnect_attempts.remove(&id);
+        state.sync.remove(&id);
+        if let Some(sessions) = state.active_peers.remove(&id) {
+            for stream in sessions.values() {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        }
         Ok(())
     }
     fn session(&self, stream: TcpStream, initiator: bool, expected: Option<&str>) -> Result<()> {
@@ -614,12 +683,13 @@ impl LanService {
         }
         let code = pairing_code(handshake.get_handshake_hash());
         let mut transport = handshake.into_transport_mode().map_err(|e| e.to_string())?;
-        let already_trusted = self
-            .state
-            .lock()
-            .unwrap()
-            .trusted
-            .contains_key(&hex::encode(&remote));
+        let (already_trusted, epoch) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.trusted.contains_key(&hex::encode(&remote)),
+                state.revocation_epochs.get(&peer_id).copied().unwrap_or(0),
+            )
+        };
         let name = local_name();
         send_message(
             &mut stream,
@@ -638,11 +708,12 @@ impl LanService {
         };
         let name: String = name.chars().take(80).collect();
         if already_trusted && remote_trusted {
-            self.state
-                .lock()
-                .unwrap()
-                .authenticated
-                .insert(peer_id.clone());
+            let mut state = self.state.lock().unwrap();
+            if !state.trusted.contains_key(&hex::encode(&remote)) {
+                return Err("Device is no longer paired".into());
+            }
+            state.authenticated.insert(peer_id.clone());
+            drop(state);
             return self.synchronize(&peer_id, &mut stream, &mut transport, initiator);
         }
         let mut random = [0u8; 16];
@@ -657,7 +728,7 @@ impl LanService {
                 expires: Instant::now() + TIMEOUT,
             },
         );
-        let result = self.finish_pairing(&request_id, &remote, &mut stream, &mut transport);
+        let result = self.finish_pairing(&request_id, &remote, epoch, &mut stream, &mut transport);
         self.state.lock().unwrap().pending.remove(&request_id);
         result.map_err(|e| format!("Pairing decision: {e}"))?;
         self.synchronize(&peer_id, &mut stream, &mut transport, initiator)
@@ -669,27 +740,65 @@ impl LanService {
         transport: &mut TransportState,
         initiator: bool,
     ) -> Result<()> {
+        let active = {
+            let mut state = self.state.lock().unwrap();
+            if !state
+                .trusted
+                .keys()
+                .any(|key| hex::decode(key).is_ok_and(|bytes| identity_id(&bytes) == id))
+            {
+                return Err("Device is no longer paired".into());
+            }
+            let socket = stream.try_clone().map_err(|e| e.to_string())?;
+            let session_id = state.next_session_id;
+            state.next_session_id = state.next_session_id.wrapping_add(1);
+            state
+                .active_peers
+                .entry(id.to_owned())
+                .or_default()
+                .insert(session_id, socket);
+            ActivePeerSession {
+                state: self.state.clone(),
+                peer_id: id.to_owned(),
+                session_id,
+                epoch: state.revocation_epochs.get(id).copied().unwrap_or(0),
+            }
+        };
         let Some(repo) = &self.repository else {
             return Ok(());
         };
         let peer = DeviceId(id.to_owned());
-        self.set_sync(id, "syncing", None, false);
-        let result = self.exchange(repo, &peer, stream, transport, initiator);
+        self.set_sync(id, active.epoch, "syncing", None, false);
+        let result = self.exchange(repo, &peer, active.epoch, stream, transport, initiator);
         match &result {
-            Ok(()) => self.set_sync(id, "synced", None, true),
+            Ok(()) => self.set_sync(id, active.epoch, "synced", None, true),
             Err(error) => {
                 let when = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_or(0, |time| time.as_secs());
-                self.set_sync(id, "error", Some(format!("{when}: {error}")), false);
+                self.set_sync(
+                    id,
+                    active.epoch,
+                    "error",
+                    Some(format!("{when}: {error}")),
+                    false,
+                );
             }
         }
         result
     }
-    fn set_sync(&self, id: &str, status: &str, detail: Option<String>, success: bool) {
+    fn set_sync(&self, id: &str, epoch: u64, status: &str, detail: Option<String>, success: bool) {
         let mut state = self.state.lock().unwrap();
-        // Removal can race the final encrypted frame; completion must not mark an
-        // already-removed discovery as online. A new session resets it to syncing.
+        // Neither revocation nor a later manual re-pair may revive an older session's status.
+        if state.revocation_epochs.get(id).copied().unwrap_or(0) != epoch
+            || !state
+                .trusted
+                .keys()
+                .any(|key| hex::decode(key).is_ok_and(|bytes| identity_id(&bytes) == id))
+        {
+            return;
+        }
+        // A disappeared discovery stays offline even if an encrypted frame races removal.
         let removed_during_session = status != "syncing"
             && state
                 .sync
@@ -791,10 +900,12 @@ impl LanService {
         &self,
         repo: &WordbookRepository,
         peer: &DeviceId,
+        epoch: u64,
         stream: &mut TcpStream,
         transport: &mut TransportState,
         initiator: bool,
     ) -> Result<()> {
+        let direct_id = &peer.0;
         let peer = self.pinned_origin(&peer.0, repo, stream, transport, initiator)?;
         let cursors = repo
             .exchange_cursors(&peer)
@@ -848,9 +959,9 @@ impl LanService {
         }
         if initiator {
             self.send_changes(repo, &peer, remote_cursors, stream, transport)?;
-            self.receive_changes(repo, &peer, stream, transport, deadline)?;
+            self.receive_changes(repo, direct_id, epoch, &peer, stream, transport, deadline)?;
         } else {
-            self.receive_changes(repo, &peer, stream, transport, deadline)?;
+            self.receive_changes(repo, direct_id, epoch, &peer, stream, transport, deadline)?;
             self.send_changes(repo, &peer, remote_cursors, stream, transport)?;
         }
         Ok(())
@@ -891,6 +1002,8 @@ impl LanService {
     fn receive_changes(
         &self,
         repo: &WordbookRepository,
+        direct_id: &str,
+        epoch: u64,
         peer: &DeviceId,
         stream: &mut TcpStream,
         transport: &mut TransportState,
@@ -902,10 +1015,9 @@ impl LanService {
                     if index == MAX_SYNC_CHANGES {
                         return Err("Sync page limit exceeded".into());
                     }
-                    let result = repo
-                        .exchange_ingest(peer, &change)
-                        .map_err(|e| format!("Sync ingest: {e:?}"))?;
-                    if result.inserted {
+                    let inserted =
+                        self.ingest_direct_change(direct_id, epoch, repo, peer, &change)?;
+                    if inserted {
                         if let Some(app) = &self.app {
                             let _ = app.emit("learning-data-synced", ());
                         }
@@ -920,10 +1032,33 @@ impl LanService {
         }
         Err("Sync page limit exceeded".into())
     }
+    // Holding the same lock as remove makes an ingest commit and revocation linearizable.
+    fn ingest_direct_change(
+        &self,
+        direct_id: &str,
+        epoch: u64,
+        repo: &WordbookRepository,
+        peer: &DeviceId,
+        change: &Envelope,
+    ) -> Result<bool> {
+        let state = self.state.lock().unwrap();
+        if state.revocation_epochs.get(direct_id).copied().unwrap_or(0) != epoch
+            || !state
+                .trusted
+                .keys()
+                .any(|key| hex::decode(key).is_ok_and(|bytes| identity_id(&bytes) == direct_id))
+        {
+            return Err("Device is no longer paired".into());
+        }
+        repo.exchange_ingest(peer, change)
+            .map(|result| result.inserted)
+            .map_err(|e| format!("Sync ingest: {e:?}"))
+    }
     fn finish_pairing(
         &self,
         id: &str,
         remote: &[u8],
+        epoch: u64,
         stream: &mut TcpStream,
         transport: &mut TransportState,
     ) -> Result<()> {
@@ -982,12 +1117,11 @@ impl LanService {
                 send_message(stream, transport, &Message::Commit)?;
                 match receive_message(stream, transport, deadline)? {
                     Message::Commit => {
-                        self.trust(remote, &name)?;
-                        self.state
-                            .lock()
-                            .unwrap()
-                            .authenticated
-                            .insert(identity_id(remote));
+                        self.trust_with_epoch(remote, &name, Some(epoch))?;
+                        let mut state = self.state.lock().unwrap();
+                        if state.trusted.contains_key(&hex::encode(remote)) {
+                            state.authenticated.insert(identity_id(remote));
+                        }
                         return Ok(());
                     }
                     _ => return Err("Remote did not commit pairing".into()),
@@ -1262,6 +1396,10 @@ pub fn lan_cancel(backend: State<'_, LanBackend>, id: String) -> Result<()> {
     backend.service()?.decide(&id, None)
 }
 
+#[tauri::command]
+pub fn lan_remove(backend: State<'_, LanBackend>, id: String) -> Result<()> {
+    backend.service()?.remove(&id)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1305,6 +1443,139 @@ mod tests {
             .any(|p| p.id == hex::encode(snow_public(&c.key).unwrap())));
         assert_ne!(pairing_code(&[0; 32]), pairing_code(&[1; 32]));
     }
+    #[test]
+    fn removing_one_pair_preserves_other_trust_pins_and_live_connections() {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let cd = tempfile::tempdir().unwrap();
+        let a = LanService::open(ad.path()).unwrap();
+        let b = LanService::open(bd.path()).unwrap();
+        let c = LanService::open(cd.path()).unwrap();
+        let b_key = snow_public(&b.key).unwrap();
+        let c_key = snow_public(&c.key).unwrap();
+        a.trust(&b_key, "B").unwrap();
+        a.trust(&c_key, "C").unwrap();
+        let (client, mut remote) = {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+            let (remote, _) = listener.accept().unwrap();
+            (client, remote)
+        };
+        let mut saved = load_trust(&a.trust_path).unwrap();
+        saved
+            .sync_ids
+            .insert(b.local_id.clone(), replay_origin(&b_key).0);
+        saved
+            .sync_ids
+            .insert(c.local_id.clone(), replay_origin(&c_key).0);
+        atomic_write(&a.trust_path, &serde_json::to_vec(&saved).unwrap()).unwrap();
+        {
+            let mut state = a.state.lock().unwrap();
+            state.sync_ids = saved.sync_ids;
+            state
+                .active_peers
+                .entry(b.local_id.clone())
+                .or_default()
+                .insert(0, client);
+            state.authenticated.insert(b.local_id.clone());
+            state.authenticated.insert(c.local_id.clone());
+            state.sync.insert(
+                b.local_id.clone(),
+                SyncView {
+                    id: b.local_id.clone(),
+                    state: "syncing".into(),
+                    detail: None,
+                    last_sync: None,
+                },
+            );
+        }
+        a.remove(&hex::encode(&b_key)).unwrap();
+        assert_eq!(a.status().trusted[0].id, hex::encode(&c_key));
+        assert!(!a.state.lock().unwrap().authenticated.contains(&b.local_id));
+        assert!(!a
+            .status()
+            .sync
+            .iter()
+            .any(|view| view.id == hex::encode(&b_key)));
+        remote
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let mut byte = [0; 1];
+        assert_eq!(remote.read(&mut byte).unwrap(), 0);
+        let saved = load_trust(&a.trust_path).unwrap();
+        assert_eq!(saved.peers.len(), 1);
+        assert_eq!(saved.sync_ids.len(), 1);
+        assert_eq!(saved.sync_ids[&c.local_id], replay_origin(&c_key).0);
+        assert_eq!(
+            LanService::open(ad.path()).unwrap().status().trusted[0].id,
+            hex::encode(&c_key)
+        );
+        assert!(a.remove(&hex::encode(&b_key)).is_err());
+        assert_eq!(a.status().trusted.len(), 1);
+        assert!(a
+            .trust_with_epoch(&b_key, "stale pairing", Some(0))
+            .is_err());
+    }
+
+    #[test]
+    fn decrypted_change_cannot_commit_after_removal_even_if_peer_repairs() {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let (a, ar) = network_peer(ad.path());
+        let (b, br) = network_peer(bd.path());
+        let key = snow_public(&b.key).unwrap();
+        a.trust(&key, "B").unwrap();
+        br.add_favorite("pending frame", "待处理").unwrap();
+        let origin = br.replay_device_id().unwrap();
+        let change = br
+            .exchange_batch(&ar.replay_device_id().unwrap(), &BTreeMap::new(), 1)
+            .unwrap()
+            .remove(0);
+        let old_epoch = a
+            .state
+            .lock()
+            .unwrap()
+            .revocation_epochs
+            .get(&b.local_id)
+            .copied()
+            .unwrap_or(0);
+        a.remove(&hex::encode(&key)).unwrap();
+        assert!(a
+            .ingest_direct_change(&b.local_id, old_epoch, &ar, &origin, &change)
+            .is_err());
+        a.trust(&key, "B manually re-paired").unwrap();
+        assert!(a
+            .ingest_direct_change(&b.local_id, old_epoch, &ar, &origin, &change)
+            .is_err());
+        assert!(ar.list_favorites().unwrap().is_empty());
+        a.set_sync(&b.local_id, old_epoch, "synced", None, true);
+        assert!(a.status().sync.is_empty());
+        let fresh_epoch = a.state.lock().unwrap().revocation_epochs[&b.local_id];
+        assert!(a
+            .ingest_direct_change(&b.local_id, fresh_epoch, &ar, &origin, &change)
+            .unwrap());
+        assert_eq!(ar.list_favorites().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn failed_trust_write_does_not_revoke_any_peer() {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let cd = tempfile::tempdir().unwrap();
+        let a = LanService::open(ad.path()).unwrap();
+        let b = LanService::open(bd.path()).unwrap();
+        let c = LanService::open(cd.path()).unwrap();
+        let b_key = hex::encode(snow_public(&b.key).unwrap());
+        a.trust(&snow_public(&b.key).unwrap(), "B").unwrap();
+        a.trust(&snow_public(&c.key).unwrap(), "C").unwrap();
+        fs::remove_file(&a.trust_path).unwrap();
+        fs::create_dir(&a.trust_path).unwrap();
+        assert!(a.remove(&b_key).is_err());
+        assert_eq!(a.status().trusted.len(), 2);
+        assert!(a.state.lock().unwrap().revocation_epochs.is_empty());
+        fs::remove_dir(&a.trust_path).unwrap();
+    }
+
     #[test]
     fn persisted_sync_pin_must_belong_to_directly_trusted_noise_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -1575,6 +1846,84 @@ mod tests {
         b.trust(&snow_public(&a.key).unwrap(), "peer").unwrap();
     }
     #[test]
+    fn removal_keeps_other_peer_sync_and_requires_code_to_pair_again() {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let cd = tempfile::tempdir().unwrap();
+        let (a, ar) = network_peer(ad.path());
+        let (b, br) = network_peer(bd.path());
+        let (c, cr) = network_peer(cd.path());
+        mutual_trust(&a, &b);
+        mutual_trust(&a, &c);
+        br.add_favorite("before removal", "旧").unwrap();
+        assert!(connect_pair(&a, &b).0.is_ok());
+        assert_eq!(ar.list_favorites().unwrap().len(), 1);
+        a.remove(&hex::encode(snow_public(&b.key).unwrap()))
+            .unwrap();
+        cr.add_favorite("still connected", "新").unwrap();
+        let (a_result, c_result) = connect_pair(&a, &c);
+        assert!(a_result.is_ok(), "{a_result:?}");
+        assert!(c_result.is_ok(), "{c_result:?}");
+        assert_eq!(ar.list_favorites().unwrap().len(), 2);
+        assert_eq!(
+            LanService::open(ad.path()).unwrap().status().trusted.len(),
+            1
+        );
+        br.add_favorite("after removal", "未授权").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let responder = {
+            let b = b.clone();
+            thread::spawn(move || b.session(listener.accept().unwrap().0, false, None))
+        };
+        let initiator = {
+            let a = a.clone();
+            let expected = b.local_id.clone();
+            thread::spawn(move || {
+                a.session(TcpStream::connect(address).unwrap(), true, Some(&expected))
+            })
+        };
+        let limit = Instant::now() + Duration::from_secs(5);
+        while a.status().pending.is_empty() || b.status().pending.is_empty() {
+            assert!(Instant::now() < limit);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(ar.list_favorites().unwrap().len(), 2);
+        assert_eq!(a.status().trusted.len(), 1);
+        let ap = &a.status().pending[0];
+        let bp = &b.status().pending[0];
+        assert_eq!(ap.code, bp.code);
+        a.decide(&ap.id, Some(&ap.code)).unwrap();
+        b.decide(&bp.id, Some(&bp.code)).unwrap();
+        assert!(initiator.join().unwrap().is_ok());
+        assert!(responder.join().unwrap().is_ok());
+        assert_eq!(ar.list_favorites().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn removed_peer_changes_can_still_arrive_through_another_trusted_peer() {
+        let ad = tempfile::tempdir().unwrap();
+        let bd = tempfile::tempdir().unwrap();
+        let cd = tempfile::tempdir().unwrap();
+        let (a, ar) = network_peer(ad.path());
+        let (b, br) = network_peer(bd.path());
+        let (c, _) = network_peer(cd.path());
+        mutual_trust(&a, &b);
+        mutual_trust(&a, &c);
+        mutual_trust(&b, &c);
+        a.remove(&hex::encode(snow_public(&b.key).unwrap()))
+            .unwrap();
+        br.add_favorite("relayed after removal", "保留中继")
+            .unwrap();
+        let (left, right) = connect_pair(&b, &c);
+        assert!(left.is_ok() && right.is_ok());
+        let (left, right) = connect_pair(&a, &c);
+        assert!(left.is_ok() && right.is_ok());
+        assert_eq!(ar.list_favorites().unwrap().len(), 1);
+        assert_eq!(a.status().trusted.len(), 1);
+    }
+
+    #[test]
     fn first_confirmed_pair_exchanges_fresh_learning_data() {
         let ad = tempfile::tempdir().unwrap();
         let bd = tempfile::tempdir().unwrap();
@@ -1818,7 +2167,7 @@ mod tests {
         let other = [7u8; 32];
         service.trust(&other, "remote").unwrap();
         let id = identity_id(&other);
-        service.set_sync(&id, "synced", None, true);
+        service.set_sync(&id, 0, "synced", None, true);
         let prior = service.status().sync[0].last_sync.clone();
         {
             let mut state = service.state.lock().unwrap();
@@ -1834,15 +2183,15 @@ mod tests {
             remove_discovered(&mut state, "remote.local.");
         }
         // A session that finishes after mDNS removal cannot restore a stale online state.
-        service.set_sync(&id, "synced", None, true);
+        service.set_sync(&id, 0, "synced", None, true);
         let status = service.status();
         assert!(status.peers.is_empty());
         assert_eq!(status.sync[0].id, hex::encode(other));
         assert_eq!(status.sync[0].state, "offline");
         assert_eq!(status.sync[0].last_sync, prior);
         assert!(!service.state.lock().unwrap().authenticated.contains(&id));
-        service.set_sync(&id, "syncing", None, false);
-        service.set_sync(&id, "synced", None, true);
+        service.set_sync(&id, 0, "syncing", None, false);
+        service.set_sync(&id, 0, "synced", None, true);
         assert_eq!(service.status().sync[0].state, "synced");
     }
 

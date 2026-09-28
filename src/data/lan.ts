@@ -23,4 +23,5 @@ export const lanService = {
   confirm: (id: string, code: string) =>
     invoke<void>("lan_confirm", { id, code }),
   cancel: (id: string) => invoke<void>("lan_cancel", { id }),
+  remove: (id: string) => invoke<void>("lan_remove", { id }),
 };

@@ -1,5 +1,7 @@
 import { Button } from "@astryxdesign/core/Button";
+import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Heading } from "@astryxdesign/core/Heading";
+import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
 import { List, ListItem } from "@astryxdesign/core/List";
 import { Section } from "@astryxdesign/core/Section";
 import { Stack } from "@astryxdesign/core/Stack";
@@ -7,7 +9,7 @@ import { Text } from "@astryxdesign/core/Text";
 import { TextInput } from "@astryxdesign/core/TextInput";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useState } from "react";
-import { type LanStatus, lanService } from "../data/lan";
+import { type LanStatus, lanService, type TrustedPeer } from "../data/lan";
 
 function DevicesPage() {
   const navigate = useNavigate();
@@ -16,6 +18,7 @@ function DevicesPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [codes, setCodes] = useState<Record<string, string>>({});
+  const [removeTarget, setRemoveTarget] = useState<TrustedPeer | null>(null);
   const refresh = useCallback(async () => {
     try {
       setStatus(await lanService.status());
@@ -62,7 +65,7 @@ function DevicesPage() {
       </Text>
       {loadError ? <Text role="alert">连接服务失败：{loadError}</Text> : null}
       {actionError ? (
-        <Text role="alert">配对操作失败：{actionError}</Text>
+        <Text role="alert">设备操作失败：{actionError}</Text>
       ) : null}
       {status?.error ? (
         <Text role="alert">
@@ -191,11 +194,69 @@ function DevicesPage() {
                             : "等待同步";
                   return `${state}${time}${sync.detail ? `；${sync.detail}` : ""}`;
                 })()}
+                endContent={
+                  <Button
+                    label={`删除与 ${peer.name} 的配对`}
+                    variant="ghost"
+                    size="sm"
+                    isDisabled={busy}
+                    onClick={() => setRemoveTarget(peer)}
+                  />
+                }
               />
             ))}
           </List>
         </Section>
       ) : null}
+      <Dialog
+        isOpen={removeTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) setRemoveTarget(null);
+        }}
+        purpose="form"
+      >
+        <Layout
+          height="auto"
+          header={
+            <DialogHeader
+              title={`删除与 ${removeTarget?.name ?? "设备"} 的配对？`}
+              onOpenChange={() => setRemoveTarget(null)}
+            />
+          }
+          content={
+            <LayoutContent>
+              <Stack gap={2}>
+                <Text>
+                  仅移除本机与该设备的直接配对，其他已配对设备仍可同步；已有学习数据不会删除。
+                </Text>
+                <Text color="secondary">
+                  该设备的新变更仍可能经其他已配对设备间接同步。如果它是唯一中继，受影响的设备需手动重新配对才能恢复同步。
+                </Text>
+              </Stack>
+            </LayoutContent>
+          }
+          footer={
+            <LayoutFooter>
+              <Stack direction="horizontal" justify="end" gap={2}>
+                <Button
+                  label="保留配对"
+                  onClick={() => setRemoveTarget(null)}
+                />
+                <Button
+                  label="删除直接配对"
+                  variant="destructive"
+                  onClick={() => {
+                    if (!removeTarget) return;
+                    const target = removeTarget;
+                    setRemoveTarget(null);
+                    void act(() => lanService.remove(target.id));
+                  }}
+                />
+              </Stack>
+            </LayoutFooter>
+          }
+        />
+      </Dialog>
     </Stack>
   );
 }
