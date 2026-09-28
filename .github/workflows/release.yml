@@ -1,0 +1,90 @@
+name: Build and release desktop apps
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  verify-tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tag matches application version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          node -e 'const version = require("./src-tauri/tauri.conf.json").version; if (process.env.TAG !== `v${version}`) { console.error(`Tag ${process.env.TAG} does not match app version v${version}`); process.exit(1); }'
+
+  windows:
+    needs: verify-tag
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+      - name: Build Windows installer
+        run: bun run tauri build --bundles nsis --ci
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: lexion-windows
+          if-no-files-found: error
+          path: src-tauri/target/release/bundle/nsis/*.exe
+
+  macos:
+    needs: verify-tag
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - name: Install frontend dependencies
+        run: bun install --frozen-lockfile
+      - name: Build universal macOS DMG
+        run: bun run tauri build --target universal-apple-darwin --bundles dmg --ci
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: lexion-macos-universal
+          if-no-files-found: error
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+
+  release:
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download installers
+        uses: actions/download-artifact@v4
+        with:
+          pattern: lexion-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          dmg=(release-assets/*.dmg)
+          exe=(release-assets/*.exe)
+          if (( ${#dmg[@]} == 0 || ${#exe[@]} == 0 )); then
+            echo "Both macOS DMG and Windows installer are required" >&2
+            exit 1
+          fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${dmg[@]}" "${exe[@]}" --clobber
+          else
+            gh release create "$TAG" "${dmg[@]}" "${exe[@]}" --verify-tag --title "$TAG" --generate-notes --notes "macOS 安装包尚未经过 Apple 签名或公证，首次打开可能受到 Gatekeeper 限制。"
+          fi
