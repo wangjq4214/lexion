@@ -318,9 +318,10 @@ impl LanService {
         }
     }
     fn start(self: &Arc<Self>) -> Result<()> {
-        let listener = TcpListener::bind("0.0.0.0:0").map_err(|e| e.to_string())?;
+        let listener =
+            TcpListener::bind("0.0.0.0:0").map_err(|e| format!("LAN TCP listener bind: {e}"))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
-        let mdns = ServiceDaemon::new().map_err(|e| e.to_string())?;
+        let mdns = ServiceDaemon::new().map_err(|e| format!("mDNS daemon: {e}"))?;
         let hostname = format!("lexion-{}.local.", &self.local_id[..12]);
         let display_name = local_name();
         let service = ServiceInfo::new(
@@ -334,26 +335,62 @@ impl LanService {
                 ("name", display_name.as_str()),
             ][..],
         )
-        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("mDNS service info: {e}"))?
         .enable_addr_auto();
-        mdns.register(service).map_err(|e| e.to_string())?;
-        let events = mdns.browse(SERVICE).map_err(|e| e.to_string())?;
+        let monitor = mdns.monitor().map_err(|e| format!("mDNS monitor: {e}"))?;
+        mdns.register(service)
+            .map_err(|e| format!("mDNS register: {e}"))?;
+        eprintln!("LAN mDNS registration requested: {SERVICE} port {port}");
+        let events = mdns
+            .browse(SERVICE)
+            .map_err(|e| format!("mDNS browse: {e}"))?;
+        eprintln!("LAN mDNS browse requested: {SERVICE}");
         let owner = self.clone();
         thread::spawn(move || {
             // Keep daemon alive for the duration of discovery.
             let _daemon = mdns;
             loop {
-                let event = events.recv_timeout(Duration::from_secs(10));
+                // Registration and resolution can fail asynchronously after the API calls succeed.
+                while let Ok(event) = monitor.try_recv() {
+                    match event {
+                        mdns_sd::DaemonEvent::Announce(name, interface) => {
+                            eprintln!("LAN mDNS announced {name} on {interface}");
+                        }
+                        mdns_sd::DaemonEvent::Error(error) => {
+                            let message = format!("mDNS daemon: {error}");
+                            eprintln!("LAN {message}");
+                            owner.state.lock().unwrap().error = Some(message);
+                        }
+                        _ => {}
+                    }
+                }
+                let event = events.recv_timeout(Duration::from_secs(1));
                 if event.is_err() && events.is_disconnected() {
                     break;
                 }
                 let mut state = owner.state.lock().unwrap();
                 match event {
                     Ok(ServiceEvent::ServiceResolved(info)) => {
+                        eprintln!(
+                            "LAN mDNS resolved {} ({} addresses)",
+                            info.get_fullname(),
+                            info.get_addresses().len()
+                        );
                         let Some(id) = info.get_property_val_str("id") else {
+                            eprintln!(
+                                "LAN mDNS ignored {}: missing id TXT record",
+                                info.get_fullname()
+                            );
                             continue;
                         };
-                        if id == owner.local_id || hex::decode(id).map_or(true, |v| v.len() != 32) {
+                        if id == owner.local_id {
+                            continue;
+                        }
+                        if hex::decode(id).map_or(true, |v| v.len() != 32) {
+                            eprintln!(
+                                "LAN mDNS ignored {}: invalid id TXT record",
+                                info.get_fullname()
+                            );
                             continue;
                         }
                         let addresses = info
@@ -377,6 +414,20 @@ impl LanService {
                     }
                     Ok(ServiceEvent::ServiceRemoved(_, fullname)) => {
                         remove_discovered(&mut state, &fullname);
+                    }
+                    Ok(ServiceEvent::SearchStarted(service)) => {
+                        eprintln!("LAN mDNS browsing {service}");
+                    }
+                    Ok(ServiceEvent::ServiceFound(_, fullname)) => {
+                        eprintln!("LAN mDNS found {fullname}; awaiting resolution");
+                    }
+                    Ok(ServiceEvent::SearchStopped(service)) => {
+                        let message = format!("mDNS browse stopped: {service}");
+                        eprintln!("LAN {message}");
+                        state.error = Some(message);
+                    }
+                    Err(error) if !events.is_disconnected() => {
+                        eprintln!("LAN mDNS browse receive: {error}");
                     }
                     _ => {}
                 }
@@ -1134,7 +1185,10 @@ impl LanBackend {
     pub fn open(dir: &Path, repository: WordbookRepository, app: tauri::AppHandle) -> Self {
         match LanService::open_with_repository(dir, Some(repository), Some(app)) {
             Ok(service) => {
-                let error = service.start().err();
+                let error = service.start().err().map(|error| {
+                    eprintln!("LAN startup failed: {error}");
+                    error
+                });
                 Self {
                     service: Some(service),
                     error,
