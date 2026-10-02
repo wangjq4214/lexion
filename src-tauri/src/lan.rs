@@ -20,6 +20,8 @@ use tauri::{Emitter, State};
 
 const SERVICE: &str = "_lexion-pair._tcp.local.";
 const NOISE: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
+// Wire compatibility, independent of software releases and operation-envelope versions.
+const SYNC_PROTOCOL_VERSION: u32 = 3;
 const TIMEOUT: Duration = Duration::from_secs(120);
 const IO_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_FRAME: usize = 4096;
@@ -926,6 +928,7 @@ impl LanService {
         transport: &mut TransportState,
         initiator: bool,
     ) -> Result<()> {
+        exchange_protocol_version(stream, transport, initiator, SYNC_PROTOCOL_VERSION)?;
         let direct_id = &peer.0;
         let peer = self.pinned_origin(&peer.0, repo, stream, transport, initiator)?;
         let cursors = repo
@@ -937,30 +940,22 @@ impl LanService {
                 stream,
                 transport,
                 &SyncMessage::Start {
-                    version: 2,
                     cursors: cursors.clone(),
                 },
             )?;
             match receive_sync(stream, transport, deadline)? {
-                SyncMessage::Start {
-                    version: 2,
-                    cursors,
-                } => cursors,
-                _ => return Err("Invalid sync introduction".into()),
+                SyncMessage::Start { cursors } => cursors,
+                _ => return Err("Expected sync cursors".into()),
             }
         } else {
             let received = match receive_sync(stream, transport, deadline)? {
-                SyncMessage::Start {
-                    version: 2,
-                    cursors,
-                } => cursors,
-                _ => return Err("Invalid sync introduction".into()),
+                SyncMessage::Start { cursors } => cursors,
+                _ => return Err("Expected sync cursors".into()),
             };
             send_sync(
                 stream,
                 transport,
                 &SyncMessage::Start {
-                    version: 2,
                     cursors: cursors.clone(),
                 },
             )?;
@@ -1195,19 +1190,13 @@ enum Message {
 }
 #[derive(Debug, Serialize, Deserialize)]
 enum SyncMessage {
+    Protocol { version: u32 },
     Identity(DeviceId),
-    Start {
-        version: u32,
-        cursors: BTreeMap<DeviceId, u64>,
-    },
+    Start { cursors: BTreeMap<DeviceId, u64> },
     Change(Envelope),
     // Followed by encrypted raw chunks containing exactly length bytes of one Change.
-    ChangeStart {
-        length: usize,
-    },
-    Done {
-        complete: bool,
-    },
+    ChangeStart { length: usize },
+    Done { complete: bool },
 }
 fn send_frame(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
     send_bounded_frame(stream, bytes, MAX_FRAME)
@@ -1308,6 +1297,40 @@ fn receive_sync_frame(
     }
     plain.truncate(len);
     Ok(plain)
+}
+// Exchange a single control frame before touching identities, cursors or learning data.
+fn exchange_protocol_version(
+    stream: &mut TcpStream,
+    transport: &mut TransportState,
+    initiator: bool,
+    local_version: u32,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let introduction = SyncMessage::Protocol {
+        version: local_version,
+    };
+    if initiator {
+        send_sync(stream, transport, &introduction)?;
+    }
+    let plain = receive_sync_frame(stream, transport, deadline)?;
+    let message = serde_json::from_slice::<SyncMessage>(&plain)
+        .map_err(|_| "Missing or invalid sync protocol version".to_string())?;
+    let SyncMessage::Protocol {
+        version: remote_version,
+    } = message
+    else {
+        return Err("Missing or invalid sync protocol version".into());
+    };
+    if !initiator {
+        // Reply even on mismatch so both peers can diagnose the incompatibility.
+        send_sync(stream, transport, &introduction)?;
+    }
+    if remote_version != local_version {
+        return Err(format!(
+            "Sync protocol version mismatch: local {local_version}, remote {remote_version}"
+        ));
+    }
+    Ok(())
 }
 fn send_sync(
     stream: &mut TcpStream,
@@ -2100,6 +2123,181 @@ mod tests {
         assert!(books.iter().any(|book| book.name == "Full book"));
         let book = books.iter().find(|book| book.name == "Full book").unwrap();
         assert_eq!(br.list_wordbook_entries(book.id).unwrap().len(), 2000);
+    }
+
+    fn protocol_transport_pair() -> (TcpStream, TransportState, TcpStream, TransportState) {
+        let a_key = [1u8; 32];
+        let b_key = [2u8; 32];
+        let mut a = Builder::new(NOISE.parse().unwrap())
+            .local_private_key(&a_key)
+            .build_initiator()
+            .unwrap();
+        let mut b = Builder::new(NOISE.parse().unwrap())
+            .local_private_key(&b_key)
+            .build_responder()
+            .unwrap();
+        let mut buffer = [0u8; MAX_FRAME];
+        let n = a.write_message(&[], &mut buffer).unwrap();
+        b.read_message(&buffer[..n], &mut []).unwrap();
+        let n = b.write_message(&[], &mut buffer).unwrap();
+        a.read_message(&buffer[..n], &mut []).unwrap();
+        let n = a.write_message(&[], &mut buffer).unwrap();
+        b.read_message(&buffer[..n], &mut []).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let left = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (right, _) = listener.accept().unwrap();
+        left.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+        right.set_read_timeout(Some(IO_TIMEOUT)).unwrap();
+        (
+            left,
+            a.into_transport_mode().unwrap(),
+            right,
+            b.into_transport_mode().unwrap(),
+        )
+    }
+
+    #[test]
+    fn protocol_versions_are_exchanged_before_comparison_on_both_sides() {
+        for remote_version in [SYNC_PROTOCOL_VERSION, SYNC_PROTOCOL_VERSION + 1] {
+            let (mut left, mut a, mut right, mut b) = protocol_transport_pair();
+            let remote = thread::spawn(move || {
+                exchange_protocol_version(&mut right, &mut b, false, remote_version)
+            });
+            let local = exchange_protocol_version(&mut left, &mut a, true, SYNC_PROTOCOL_VERSION);
+            let remote = remote.join().unwrap();
+            if remote_version == SYNC_PROTOCOL_VERSION {
+                assert!(local.is_ok(), "{local:?}");
+                assert!(remote.is_ok(), "{remote:?}");
+            } else {
+                assert_eq!(local.unwrap_err(), format!(
+                    "Sync protocol version mismatch: local {SYNC_PROTOCOL_VERSION}, remote {remote_version}"
+                ));
+                assert_eq!(remote.unwrap_err(), format!(
+                    "Sync protocol version mismatch: local {remote_version}, remote {SYNC_PROTOCOL_VERSION}"
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn protocol_rejection_preserves_pairing_data_and_last_success_in_either_role() {
+        for initiator in [true, false] {
+            let ad = tempfile::tempdir().unwrap();
+            let bd = tempfile::tempdir().unwrap();
+            let (a, ar) = network_peer(ad.path());
+            let (b, _) = network_peer(bd.path());
+            mutual_trust(&a, &b);
+            ar.add_favorite("local", "本地").unwrap();
+            a.set_sync(&b.local_id, 0, "synced", None, true);
+            let previous = a.status().sync[0].last_sync.clone();
+            let trust = fs::read(&a.trust_path).unwrap();
+            let cursors = ar.exchange_cursors(&DeviceId(b.local_id.clone())).unwrap();
+            let (mut left, mut local_transport, mut right, mut remote_transport) =
+                protocol_transport_pair();
+            let service = a.clone();
+            let peer_id = b.local_id.clone();
+            let local = thread::spawn(move || {
+                service.synchronize(&peer_id, &mut left, &mut local_transport, initiator)
+            });
+            if initiator {
+                assert!(matches!(
+                    receive_sync(
+                        &mut right,
+                        &mut remote_transport,
+                        Instant::now() + Duration::from_secs(2)
+                    )
+                    .unwrap(),
+                    SyncMessage::Protocol {
+                        version: SYNC_PROTOCOL_VERSION
+                    }
+                ));
+            }
+            send_sync(
+                &mut right,
+                &mut remote_transport,
+                &SyncMessage::Protocol {
+                    version: SYNC_PROTOCOL_VERSION + 1,
+                },
+            )
+            .unwrap();
+            if !initiator {
+                assert!(matches!(
+                    receive_sync(
+                        &mut right,
+                        &mut remote_transport,
+                        Instant::now() + Duration::from_secs(2)
+                    )
+                    .unwrap(),
+                    SyncMessage::Protocol {
+                        version: SYNC_PROTOCOL_VERSION
+                    }
+                ));
+            }
+            assert!(local
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .contains("Sync protocol version mismatch"));
+            // Nothing follows the version response: no identity, cursor or learning frame.
+            assert_eq!(
+                receive_sync_frame(
+                    &mut right,
+                    &mut remote_transport,
+                    Instant::now() + Duration::from_secs(2)
+                )
+                .unwrap_err(),
+                "Peer disconnected"
+            );
+            assert_eq!(fs::read(&a.trust_path).unwrap(), trust);
+            assert_eq!(a.status().trusted.len(), 1);
+            assert_eq!(ar.list_favorites().unwrap()[0].english, "local");
+            assert_eq!(ar.list_favorites().unwrap().len(), 1);
+            assert_eq!(
+                ar.exchange_cursors(&DeviceId(b.local_id.clone())).unwrap(),
+                cursors
+            );
+            let status = a.status();
+            assert_eq!(status.sync[0].state, "error");
+            assert_eq!(status.sync[0].last_sync, previous);
+            assert!(status.sync[0]
+                .detail
+                .as_ref()
+                .unwrap()
+                .contains("local 3, remote 4"));
+            assert!(a.state.lock().unwrap().sync_ids.is_empty());
+            ar.add_favorite("still usable", "仍可使用").unwrap();
+        }
+    }
+
+    #[test]
+    fn protocol_introduction_rejects_legacy_missing_malformed_and_data_frames() {
+        for initiator in [true, false] {
+            for plain in [
+                br#"{"Identity":"abcd1234abcd1234abcd1234abcd1234"}"#.as_slice(),
+                br#"{"Start":{"version":2,"cursors":{}}}"#.as_slice(),
+                br#"{"Protocol":{}}"#.as_slice(),
+                br#"{"Protocol":{"version":"3"}}"#.as_slice(),
+                b"not json".as_slice(),
+                br#"{"ChangeStart":{"length":60000}}"#.as_slice(),
+            ] {
+                let (mut left, mut a, mut right, mut b) = protocol_transport_pair();
+                let local = thread::spawn(move || {
+                    exchange_protocol_version(&mut left, &mut a, initiator, SYNC_PROTOCOL_VERSION)
+                });
+                if initiator {
+                    assert!(matches!(
+                        receive_sync(&mut right, &mut b, Instant::now() + Duration::from_secs(2))
+                            .unwrap(),
+                        SyncMessage::Protocol { .. }
+                    ));
+                }
+                send_sync_frame(&mut right, &mut b, plain).unwrap();
+                assert_eq!(
+                    local.join().unwrap().unwrap_err(),
+                    "Missing or invalid sync protocol version"
+                );
+            }
+        }
     }
 
     #[test]

@@ -87,3 +87,7 @@
 - **Relationships:**
   - references wordbook
   - depends on review-schedule
+
+### sync-protocol-version
+- **Definition:** The version of the device-to-device synchronization protocol, independent of the application's software release version. Peers must exchange their synchronization protocol versions before synchronizing; synchronization is permitted only when those versions match.
+- **Synonyms:** 同步协议版本
