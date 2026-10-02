@@ -500,3 +500,189 @@ it("reports a failed removal while leaving other pairings visible", async () => 
     screen.getByRole("button", { name: "删除与 设备 C 的配对" }),
   ).toBeEnabled();
 });
+
+function mockSyncStatus(sync: NonNullable<LanStatus["sync"]>) {
+  vi.mocked(lanService.status).mockResolvedValue({
+    peers: [],
+    pending: [],
+    error: null,
+    trusted: sync.map((item) => ({
+      id: item.id,
+      name: item.id === "peer-1" ? "学习设备" : "另一台设备",
+      peer_id: item.id,
+      authenticated: true,
+    })),
+    sync,
+  });
+}
+
+it("shows independent actual percentages for each device", async () => {
+  mockSyncStatus([
+    {
+      id: "peer-1",
+      state: "syncing",
+      progress: 42,
+      detail: null,
+      last_sync: null,
+    },
+    {
+      id: "peer-2",
+      state: "syncing",
+      progress: 78,
+      detail: null,
+      last_sync: null,
+    },
+  ]);
+  render(
+    <App
+      wordbookService={wordbookService}
+      history={createMemoryHistory({ initialEntries: ["/devices"] })}
+    />,
+  );
+  expect(
+    await screen.findByRole("progressbar", { name: "学习设备同步进度" }),
+  ).toHaveAttribute("aria-valuenow", "42");
+  expect(
+    screen.getByRole("progressbar", { name: "另一台设备同步进度" }),
+  ).toHaveAttribute("aria-valuenow", "78");
+  expect(screen.getByText("42%")).toBeInTheDocument();
+  expect(screen.getByText("78%")).toBeInTheDocument();
+});
+
+it("hides retryable details, exposes exhausted failure, then clears it on recovery", async () => {
+  mockSyncStatus([
+    {
+      id: "peer-1",
+      state: "retrying",
+      retry_attempt: 3,
+      progress: 42,
+      detail: "连接中断",
+      last_sync: null,
+    },
+  ]);
+  render(
+    <App
+      wordbookService={wordbookService}
+      history={createMemoryHistory({ initialEntries: ["/devices"] })}
+    />,
+  );
+  expect(await screen.findByText("正在重试（3/3）")).toBeInTheDocument();
+  expect(screen.queryByText(/连接中断/)).not.toBeInTheDocument();
+  expect(screen.queryByText(/同步失败/)).not.toBeInTheDocument();
+  const user = userEvent.setup();
+  mockSyncStatus([
+    {
+      id: "peer-1",
+      state: "error",
+      retry_attempt: 3,
+      progress: 42,
+      detail: "连接中断",
+      last_sync: null,
+    },
+  ]);
+  await user.click(screen.getByRole("button", { name: "刷新设备" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "同步失败；连接中断",
+  );
+  mockSyncStatus([
+    {
+      id: "peer-1",
+      state: "synced",
+      retry_attempt: 0,
+      progress: 100,
+      detail: null,
+      last_sync: null,
+    },
+  ]);
+  await user.click(screen.getByRole("button", { name: "刷新设备" }));
+  expect(await screen.findByText("同步完成")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(
+    screen.getByRole("progressbar", { name: "学习设备同步进度" }),
+  ).toHaveAttribute("aria-valuenow", "100");
+  expect(screen.getByText("100%")).toBeInTheDocument();
+});
+
+it("does not claim 100 percent before completion or invent unknown progress", async () => {
+  mockSyncStatus([
+    {
+      id: "peer-1",
+      state: "syncing",
+      progress: 100,
+      detail: "本批还有数据",
+      last_sync: null,
+    },
+    {
+      id: "peer-2",
+      state: "retrying",
+      retry_attempt: 1,
+      progress: null,
+      detail: "timeout",
+      last_sync: null,
+    },
+  ]);
+  render(
+    <App
+      wordbookService={wordbookService}
+      history={createMemoryHistory({ initialEntries: ["/devices"] })}
+    />,
+  );
+  expect(
+    await screen.findByRole("progressbar", { name: "学习设备同步进度" }),
+  ).toHaveAttribute("aria-valuenow", "99");
+  expect(
+    screen.getByRole("progressbar", { name: "另一台设备同步进度" }),
+  ).not.toHaveAttribute("aria-valuenow");
+  expect(screen.queryByText(/本批还有数据|timeout/)).not.toBeInTheDocument();
+});
+
+it.each(["retrying", "error"])(
+  "closes manual reconnect progress when feedback becomes %s",
+  async (state) => {
+    let attempted = false;
+    vi.mocked(lanService.pair).mockImplementation(async () => {
+      attempted = true;
+    });
+    vi.mocked(lanService.status).mockImplementation(async () => ({
+      peers: [{ id: "peer-1", name: "学习设备", trusted: false }],
+      pending: [],
+      error: null,
+      trusted: [
+        {
+          id: "saved-key",
+          peer_id: "peer-1",
+          name: "学习设备",
+          authenticated: false,
+        },
+      ],
+      sync: attempted
+        ? [
+            {
+              id: "saved-key",
+              state,
+              retry_attempt: 1,
+              progress: null,
+              detail: state === "error" ? "连接失败" : null,
+              last_sync: null,
+            },
+          ]
+        : [],
+    }));
+    render(
+      <App
+        wordbookService={wordbookService}
+        history={createMemoryHistory({ initialEntries: ["/devices"] })}
+      />,
+    );
+    await userEvent.click(
+      await screen.findByRole("button", { name: "与 学习设备 建立配对" }),
+    );
+    await waitFor(() => expect(lanService.status).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        state === "error" ? "同步失败；连接失败" : "正在重试（1/3）",
+      ),
+    ).toBeInTheDocument();
+  },
+);

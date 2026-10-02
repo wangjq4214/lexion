@@ -19,6 +19,8 @@ export type SyncView = {
   state: string;
   detail: string | null;
   last_sync: string | null;
+  progress?: number | null;
+  retry_attempt?: number;
 };
 export type LanStatus = {
   peers: LanPeer[];

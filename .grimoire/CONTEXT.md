@@ -91,3 +91,7 @@
 ### sync-protocol-version
 - **Definition:** The version of the device-to-device synchronization protocol, independent of the application's software release version. Peers must exchange their synchronization protocol versions before synchronizing; synchronization is permitted only when those versions match.
 - **Synonyms:** 同步协议版本
+
+### sync-feedback
+- **Definition:** User-visible feedback for device-to-device synchronization must show progress as a percentage. Errors that do not interrupt synchronization must not be shown to the user. After an initial failure that permits automatic retry, automatically retry three times at the existing 30-second interval; while these retries are in progress, show a retrying status without displaying the error. If all three retries fail, show synchronization failure and its reason. Continue background recovery attempts using the existing mechanism after displaying the failure, and clear the displayed error once synchronization succeeds.
+- **Synonyms:** 同步反馈

@@ -640,10 +640,32 @@ impl WordbookRepository {
     /// Export the missing applied suffix of every origin in canonical causal order.
     /// The caller advances its per-origin cursors after each sent envelope, allowing
     /// bounded pages to resume without a separate global position.
+    #[cfg(test)]
     pub(crate) fn exchange_batch(
         &self,
         peer: &DeviceId,
         after: &BTreeMap<DeviceId, u64>,
+        limit: usize,
+    ) -> Result<Vec<Envelope>, ReplayError> {
+        self.exchange_batch_bounded(peer, after, None, limit)
+    }
+
+    /// Export only operations present in the round's initial applied snapshot.
+    pub(crate) fn exchange_batch_until(
+        &self,
+        peer: &DeviceId,
+        after: &BTreeMap<DeviceId, u64>,
+        until: &BTreeMap<DeviceId, u64>,
+        limit: usize,
+    ) -> Result<Vec<Envelope>, ReplayError> {
+        self.exchange_batch_bounded(peer, after, Some(until), limit)
+    }
+
+    fn exchange_batch_bounded(
+        &self,
+        peer: &DeviceId,
+        after: &BTreeMap<DeviceId, u64>,
+        until: Option<&BTreeMap<DeviceId, u64>>,
         limit: usize,
     ) -> Result<Vec<Envelope>, ReplayError> {
         if limit == 0 || limit > 16 {
@@ -684,6 +706,9 @@ impl WordbookRepository {
         Ok(order
             .into_iter()
             .filter(|id| id.sequence > after.get(&id.device).copied().unwrap_or(0))
+            .filter(|id| {
+                until.is_none_or(|end| id.sequence <= end.get(&id.device).copied().unwrap_or(0))
+            })
             .take(limit)
             .map(|id| ready[&id].clone())
             .collect())

@@ -21,7 +21,7 @@ use tauri::{Emitter, State};
 const SERVICE: &str = "_lexion-pair._tcp.local.";
 const NOISE: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 // Wire compatibility, independent of software releases and operation-envelope versions.
-const SYNC_PROTOCOL_VERSION: u32 = 3;
+const SYNC_PROTOCOL_VERSION: u32 = 4;
 const TIMEOUT: Duration = Duration::from_secs(120);
 const IO_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_FRAME: usize = 4096;
@@ -29,6 +29,8 @@ const MAX_SYNC_FRAME: usize = 60_000;
 const MAX_SYNC_MESSAGE: usize = 16 * 1024 * 1024;
 const MAX_SYNC_CHANGES: usize = 128;
 const MAX_SESSIONS: usize = 8;
+const RETRY_INTERVAL: Duration = Duration::from_secs(30);
+const AUTOMATIC_RETRIES: u8 = 3;
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -67,6 +69,8 @@ pub struct SyncView {
     pub state: String,
     pub detail: Option<String>,
     pub last_sync: Option<String>,
+    pub progress: Option<u8>,
+    pub retry_attempt: u8,
 }
 
 #[derive(Clone)]
@@ -90,6 +94,11 @@ struct Shared {
     authenticated: std::collections::HashSet<String>,
     reconnect_attempts: HashMap<String, Instant>,
     sync: HashMap<String, SyncView>,
+    failures: HashMap<String, u8>,
+    successes: HashMap<String, u64>,
+    connecting: std::collections::HashSet<String>,
+    failed_attempts: std::collections::HashSet<String>,
+    feedback_sessions: HashMap<String, u64>,
     active_sessions: usize,
     sync_ids: HashMap<String, String>,
     active_peers: HashMap<String, HashMap<u64, TcpStream>>,
@@ -101,6 +110,84 @@ struct ActivePeerSession {
     peer_id: String,
     session_id: u64,
     epoch: u64,
+}
+
+struct ConnectionAttempt {
+    state: Arc<Mutex<Shared>>,
+    peer_id: String,
+    epoch: u64,
+    successes: u64,
+}
+impl Drop for ConnectionAttempt {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap();
+        if state
+            .revocation_epochs
+            .get(&self.peer_id)
+            .copied()
+            .unwrap_or(0)
+            == self.epoch
+        {
+            state.connecting.remove(&self.peer_id);
+            state.failed_attempts.remove(&self.peer_id);
+            state
+                .reconnect_attempts
+                .insert(self.peer_id.clone(), Instant::now());
+        }
+    }
+}
+
+struct SyncRound {
+    local: BTreeMap<DeviceId, u64>,
+    remote: BTreeMap<DeviceId, u64>,
+    total: u128,
+    completed: u128,
+    session: Option<u64>,
+}
+impl SyncRound {
+    fn new(local: BTreeMap<DeviceId, u64>, remote: BTreeMap<DeviceId, u64>) -> Self {
+        let difference = |left: &BTreeMap<DeviceId, u64>, right: &BTreeMap<DeviceId, u64>| {
+            left.iter()
+                .map(|(id, end)| {
+                    u128::from(end.saturating_sub(right.get(id).copied().unwrap_or(0)))
+                })
+                .sum::<u128>()
+        };
+        let total = difference(&local, &remote) + difference(&remote, &local);
+        Self {
+            local,
+            remote,
+            total,
+            completed: 0,
+            session: None,
+        }
+    }
+    fn percentage(&self) -> u8 {
+        // Completion is a separate protocol outcome, never inferred from transmitted bytes.
+        (self.completed * 100)
+            .checked_div(self.total)
+            .unwrap_or(0)
+            .min(99) as u8
+    }
+}
+
+fn retryable(error: &str) -> bool {
+    error == "timeout"
+        || error == "Peer disconnected"
+        || error == "Too many LAN sessions"
+        || error.starts_with("LAN I/O: ")
+}
+fn is_trusted(state: &Shared, id: &str) -> bool {
+    state
+        .trusted
+        .keys()
+        .any(|key| hex::decode(key).is_ok_and(|bytes| identity_id(&bytes) == id))
+}
+fn current_peer(state: &Shared, id: &str, epoch: u64) -> bool {
+    state.revocation_epochs.get(id).copied().unwrap_or(0) == epoch && is_trusted(state, id)
+}
+fn owns_feedback(state: &Shared, id: &str, session: Option<u64>) -> bool {
+    session.is_none_or(|session| state.feedback_sessions.get(id).copied() == Some(session))
 }
 impl Drop for ActivePeerSession {
     fn drop(&mut self) {
@@ -281,6 +368,11 @@ impl LanService {
                 authenticated: Default::default(),
                 reconnect_attempts: HashMap::new(),
                 sync: HashMap::new(),
+                failures: HashMap::new(),
+                successes: HashMap::new(),
+                connecting: Default::default(),
+                failed_attempts: Default::default(),
+                feedback_sessions: HashMap::new(),
                 active_sessions: 0,
                 sync_ids: trust.sync_ids,
                 active_peers: HashMap::new(),
@@ -477,10 +569,12 @@ impl LanService {
                     .collect();
                 for id in trusted_ids {
                     if state.discovered.contains_key(&id)
+                        && !state.connecting.contains(&id)
+                        && !state.active_peers.contains_key(&id)
                         && state
                             .reconnect_attempts
                             .get(&id)
-                            .is_none_or(|last| last.elapsed() >= Duration::from_secs(30))
+                            .is_none_or(|last| last.elapsed() >= RETRY_INTERVAL)
                     {
                         state.reconnect_attempts.insert(id.clone(), Instant::now());
                         let owner = owner.clone();
@@ -516,40 +610,89 @@ impl LanService {
         Ok(())
     }
     fn pair(self: &Arc<Self>, peer_id: &str) -> Result<()> {
-        let peer = self
-            .state
-            .lock()
-            .unwrap()
-            .discovered
-            .get(peer_id)
-            .cloned()
-            .ok_or("Peer is not discovered")?;
-        let addresses = peer.addresses;
-        let expected = peer_id.to_string();
+        let (peer, attempt, trusted) = {
+            let mut state = self.state.lock().unwrap();
+            let peer = state
+                .discovered
+                .get(peer_id)
+                .cloned()
+                .ok_or("Peer is not discovered")?;
+            if state.connecting.contains(peer_id) || state.active_peers.contains_key(peer_id) {
+                return Ok(());
+            }
+            state.connecting.insert(peer_id.to_owned());
+            state.failed_attempts.remove(peer_id);
+            let trusted = is_trusted(&state, peer_id);
+            if !trusted {
+                state.error = None;
+            }
+            let attempt = ConnectionAttempt {
+                state: self.state.clone(),
+                peer_id: peer_id.to_owned(),
+                epoch: state.revocation_epochs.get(peer_id).copied().unwrap_or(0),
+                successes: state.successes.get(peer_id).copied().unwrap_or(0),
+            };
+            (peer, attempt, trusted)
+        };
+        if trusted {
+            self.set_sync(peer_id, attempt.epoch, "syncing", None, false);
+        }
         let owner = self.clone();
-        self.state.lock().unwrap().error = None;
         thread::spawn(move || {
-            let mut last_error = "No reachable address".to_string();
-            for address in addresses {
+            let mut last_error = "LAN I/O: No reachable address".to_string();
+            for address in peer.addresses {
+                // A removed or re-paired device must not be contacted by an older attempt.
+                if owner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .revocation_epochs
+                    .get(&attempt.peer_id)
+                    .copied()
+                    .unwrap_or(0)
+                    != attempt.epoch
+                {
+                    return;
+                }
                 match TcpStream::connect_timeout(&address, Duration::from_secs(3)) {
-                    Ok(stream) => {
-                        match owner.session(stream, true, Some(&expected)) {
-                            Ok(()) => {
-                                owner.state.lock().unwrap().error = None;
-                                return;
+                    Ok(stream) => match owner.session_for_attempt(
+                        stream,
+                        true,
+                        Some(&attempt.peer_id),
+                        Some(attempt.epoch),
+                        false,
+                    ) {
+                        Ok(()) => return,
+                        Err(e) => {
+                            last_error = e;
+                            if !retryable(&last_error) {
+                                break;
                             }
-                            Err(e) if e.starts_with("Pairing decision: ") => {
-                                owner.state.lock().unwrap().error = Some(e);
-                                return; // Never restart a cancelled or failed user decision.
-                            }
-                            Err(e) => last_error = e,
                         }
-                    }
-                    Err(e) => last_error = e.to_string(),
+                    },
+                    Err(e) => last_error = format!("LAN I/O: {e}"),
                 }
             }
-            owner.state.lock().unwrap().error =
-                Some(format!("Pairing connection failed: {last_error}"));
+            if trusted {
+                if owner
+                    .state
+                    .lock()
+                    .unwrap()
+                    .active_peers
+                    .contains_key(&attempt.peer_id)
+                {
+                    return;
+                }
+                owner.record_failure(
+                    &attempt.peer_id,
+                    attempt.epoch,
+                    attempt.successes,
+                    &last_error,
+                );
+            } else {
+                owner.state.lock().unwrap().error =
+                    Some(format!("Pairing connection failed: {last_error}"));
+            }
         });
         Ok(())
     }
@@ -629,6 +772,11 @@ impl LanService {
         state.authenticated.remove(&id);
         state.reconnect_attempts.remove(&id);
         state.sync.remove(&id);
+        state.failures.remove(&id);
+        state.successes.remove(&id);
+        state.connecting.remove(&id);
+        state.failed_attempts.remove(&id);
+        state.feedback_sessions.remove(&id);
         if let Some(sessions) = state.active_peers.remove(&id) {
             for stream in sessions.values() {
                 let _ = stream.shutdown(Shutdown::Both);
@@ -637,6 +785,16 @@ impl LanService {
         Ok(())
     }
     fn session(&self, stream: TcpStream, initiator: bool, expected: Option<&str>) -> Result<()> {
+        self.session_for_attempt(stream, initiator, expected, None, true)
+    }
+    fn session_for_attempt(
+        &self,
+        stream: TcpStream,
+        initiator: bool,
+        expected: Option<&str>,
+        expected_epoch: Option<u64>,
+        report_failure: bool,
+    ) -> Result<()> {
         {
             let mut state = self.state.lock().unwrap();
             if state.active_sessions >= MAX_SESSIONS {
@@ -651,14 +809,19 @@ impl LanService {
             }
         }
         let _guard = SessionGuard(self.state.clone());
-        self.session_inner(stream, initiator, expected)
+        self.session_inner(stream, initiator, expected, expected_epoch, report_failure)
     }
     fn session_inner(
         &self,
         mut stream: TcpStream,
         initiator: bool,
         expected: Option<&str>,
+        expected_epoch: Option<u64>,
+        report_failure: bool,
     ) -> Result<()> {
+        stream
+            .set_nodelay(true)
+            .map_err(|e| format!("LAN I/O: {e}"))?;
         stream
             .set_read_timeout(Some(IO_TIMEOUT))
             .map_err(|e| e.to_string())?;
@@ -708,6 +871,9 @@ impl LanService {
                 state.revocation_epochs.get(&peer_id).copied().unwrap_or(0),
             )
         };
+        if expected_epoch.is_some_and(|expected| expected != epoch) {
+            return Err("Device pairing changed during connection".into());
+        }
         let name = local_name();
         send_message(
             &mut stream,
@@ -727,12 +893,19 @@ impl LanService {
         let name: String = name.chars().take(80).collect();
         if already_trusted && remote_trusted {
             let mut state = self.state.lock().unwrap();
-            if !state.trusted.contains_key(&hex::encode(&remote)) {
+            if !current_peer(&state, &peer_id, epoch) {
                 return Err("Device is no longer paired".into());
             }
             state.authenticated.insert(peer_id.clone());
             drop(state);
-            return self.synchronize(&peer_id, &mut stream, &mut transport, initiator);
+            return self.synchronize(
+                &peer_id,
+                &mut stream,
+                &mut transport,
+                initiator,
+                epoch,
+                report_failure,
+            );
         }
         let mut random = [0u8; 16];
         getrandom::fill(&mut random).map_err(|e| e.to_string())?;
@@ -754,7 +927,14 @@ impl LanService {
         let result = self.finish_pairing(&request_id, &remote, epoch, &mut stream, &mut transport);
         self.state.lock().unwrap().pending.remove(&request_id);
         result.map_err(|e| format!("Pairing decision: {e}"))?;
-        self.synchronize(&peer_id, &mut stream, &mut transport, initiator)
+        self.synchronize(
+            &peer_id,
+            &mut stream,
+            &mut transport,
+            initiator,
+            epoch,
+            report_failure,
+        )
     }
     fn synchronize(
         &self,
@@ -762,19 +942,18 @@ impl LanService {
         stream: &mut TcpStream,
         transport: &mut TransportState,
         initiator: bool,
+        epoch: u64,
+        report_failure: bool,
     ) -> Result<()> {
         let active = {
             let mut state = self.state.lock().unwrap();
-            if !state
-                .trusted
-                .keys()
-                .any(|key| hex::decode(key).is_ok_and(|bytes| identity_id(&bytes) == id))
-            {
+            if !current_peer(&state, id, epoch) {
                 return Err("Device is no longer paired".into());
             }
             let socket = stream.try_clone().map_err(|e| e.to_string())?;
             let session_id = state.next_session_id;
             state.next_session_id = state.next_session_id.wrapping_add(1);
+            state.feedback_sessions.insert(id.to_owned(), session_id);
             state
                 .active_peers
                 .entry(id.to_owned())
@@ -784,72 +963,179 @@ impl LanService {
                 state: self.state.clone(),
                 peer_id: id.to_owned(),
                 session_id,
-                epoch: state.revocation_epochs.get(id).copied().unwrap_or(0),
+                epoch,
             }
         };
         let Some(repo) = &self.repository else {
             return Ok(());
         };
         let peer = DeviceId(id.to_owned());
-        self.set_sync(id, active.epoch, "syncing", None, false);
-        let result = self.exchange(repo, &peer, active.epoch, stream, transport, initiator);
+        let successes = self
+            .state
+            .lock()
+            .unwrap()
+            .successes
+            .get(id)
+            .copied()
+            .unwrap_or(0);
+        self.set_sync_for_session(
+            id,
+            active.epoch,
+            Some(active.session_id),
+            "syncing",
+            None,
+            false,
+        );
+        let result = self.exchange(repo, &peer, &active, stream, transport, initiator);
         match &result {
-            Ok(()) => self.set_sync(id, active.epoch, "synced", None, true),
-            Err(error) => {
-                let when = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .map_or(0, |time| time.as_secs());
-                self.set_sync(
-                    id,
-                    active.epoch,
-                    "error",
-                    Some(format!("{when}: {error}")),
-                    false,
-                );
-            }
+            Ok(()) => self.set_sync_for_session(
+                id,
+                active.epoch,
+                Some(active.session_id),
+                "synced",
+                None,
+                true,
+            ),
+            Err(error) if report_failure => self.record_failure_for_session(
+                id,
+                active.epoch,
+                successes,
+                Some(active.session_id),
+                error,
+            ),
+            Err(_) => {}
         }
         result
     }
     fn set_sync(&self, id: &str, epoch: u64, status: &str, detail: Option<String>, success: bool) {
+        self.set_sync_for_session(id, epoch, None, status, detail, success);
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn set_sync_for_session(
+        &self,
+        id: &str,
+        epoch: u64,
+        session: Option<u64>,
+        status: &str,
+        detail: Option<String>,
+        success: bool,
+    ) {
         let mut state = self.state.lock().unwrap();
-        // Neither revocation nor a later manual re-pair may revive an older session's status.
-        if state.revocation_epochs.get(id).copied().unwrap_or(0) != epoch
-            || !state
-                .trusted
-                .keys()
-                .any(|key| hex::decode(key).is_ok_and(|bytes| identity_id(&bytes) == id))
-        {
+        if !current_peer(&state, id, epoch) || !owns_feedback(&state, id, session) {
             return;
         }
-        // A disappeared discovery stays offline even if an encrypted frame races removal.
-        let removed_during_session = status != "syncing"
-            && state
-                .sync
-                .get(id)
+        let previous = state.sync.get(id).cloned();
+        let removed = status != "syncing"
+            && previous
+                .as_ref()
                 .is_some_and(|view| view.state == "offline");
-        let previous = state.sync.get(id).and_then(|view| view.last_sync.clone());
+        if removed {
+            return;
+        }
+        if success {
+            state.failures.remove(id);
+            state.failed_attempts.remove(id);
+            *state.successes.entry(id.to_owned()).or_default() += 1;
+            state
+                .reconnect_attempts
+                .insert(id.to_owned(), Instant::now());
+        }
+        let failures = state.failures.get(id).copied().unwrap_or(0);
+        // Recovery probes cannot dismiss an exhausted or non-retryable failure.
+        let retained_error = !success
+            && status == "syncing"
+            && previous.as_ref().is_some_and(|view| view.state == "error");
         let last_sync = if success {
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .ok()
                 .map(|time| time.as_secs().to_string())
         } else {
-            previous
+            previous.as_ref().and_then(|view| view.last_sync.clone())
         };
         state.sync.insert(
             id.to_owned(),
             SyncView {
                 id: id.to_owned(),
-                state: if removed_during_session {
-                    "offline"
+                state: if retained_error {
+                    "error"
+                } else if status == "syncing" && failures > 0 {
+                    "retrying"
                 } else {
                     status
                 }
                 .to_owned(),
-                detail,
+                detail: if retained_error {
+                    previous.and_then(|view| view.detail)
+                } else {
+                    detail
+                },
                 last_sync,
+                progress: if success { Some(100) } else { None },
+                retry_attempt: failures.min(AUTOMATIC_RETRIES),
             },
         );
+    }
+    fn record_failure(&self, id: &str, epoch: u64, successes: u64, error: &str) {
+        self.record_failure_for_session(id, epoch, successes, None, error);
+    }
+    fn record_failure_for_session(
+        &self,
+        id: &str,
+        epoch: u64,
+        successes: u64,
+        session: Option<u64>,
+        error: &str,
+    ) {
+        let mut state = self.state.lock().unwrap();
+        if !current_peer(&state, id, epoch)
+            || !owns_feedback(&state, id, session)
+            || state.successes.get(id).copied().unwrap_or(0) != successes
+        {
+            return;
+        }
+        state
+            .reconnect_attempts
+            .insert(id.to_owned(), Instant::now());
+        // Incoming and outgoing sessions can fail within one automatic dial cycle.
+        // Surface the failure immediately, but spend that cycle's retry budget only once.
+        let count_failure =
+            !state.connecting.contains(id) || state.failed_attempts.insert(id.to_owned());
+        let failures = state.failures.entry(id.to_owned()).or_default();
+        if count_failure {
+            *failures = failures.saturating_add(1).min(AUTOMATIC_RETRIES + 1);
+        }
+        let count = *failures;
+        let view = state.sync.entry(id.to_owned()).or_insert(SyncView {
+            id: id.to_owned(),
+            state: "waiting".into(),
+            detail: None,
+            last_sync: None,
+            progress: None,
+            retry_attempt: 0,
+        });
+        if view.state == "offline" {
+            return;
+        }
+        view.retry_attempt = count.min(AUTOMATIC_RETRIES);
+        if !retryable(error) || count > AUTOMATIC_RETRIES || view.state == "error" {
+            view.state = "error".into();
+            view.detail = Some(error.to_owned());
+        } else {
+            view.state = "retrying".into();
+            view.detail = None;
+        }
+    }
+    fn update_progress(&self, id: &str, epoch: u64, round: &SyncRound) {
+        let mut state = self.state.lock().unwrap();
+        if !current_peer(&state, id, epoch) || !owns_feedback(&state, id, round.session) {
+            return;
+        }
+        if let Some(view) = state.sync.get_mut(id) {
+            if view.state != "offline" {
+                view.progress = Some(round.percentage());
+            }
+        }
     }
     fn pinned_origin(
         &self,
@@ -923,7 +1209,7 @@ impl LanService {
         &self,
         repo: &WordbookRepository,
         peer: &DeviceId,
-        epoch: u64,
+        active: &ActivePeerSession,
         stream: &mut TcpStream,
         transport: &mut TransportState,
         initiator: bool,
@@ -965,6 +1251,13 @@ impl LanService {
             .replay_device_id()
             .map_err(|e| format!("Replay identity: {e:?}"))?;
         if remote_cursors.len() > 512
+            || remote_cursors.keys().any(|id| {
+                id.0.len() != 32
+                    || !id
+                        .0
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
             || remote_cursors
                 .values()
                 .any(|cursor| *cursor > i64::MAX as u64)
@@ -973,80 +1266,149 @@ impl LanService {
         {
             return Err("Peer reported an invalid sync cursor".into());
         }
+        let mut round = SyncRound::new(cursors, remote_cursors.clone());
+        let epoch = active.epoch;
+        round.session = Some(active.session_id);
+        self.update_progress(direct_id, epoch, &round);
         if initiator {
-            self.send_changes(repo, &peer, remote_cursors, stream, transport)?;
-            self.receive_changes(repo, direct_id, epoch, &peer, stream, transport, deadline)?;
+            self.send_changes(
+                repo,
+                direct_id,
+                epoch,
+                &peer,
+                remote_cursors,
+                &mut round,
+                stream,
+                transport,
+                deadline,
+            )?;
+            self.receive_changes(
+                repo, direct_id, epoch, &peer, &mut round, stream, transport, deadline,
+            )?;
         } else {
-            self.receive_changes(repo, direct_id, epoch, &peer, stream, transport, deadline)?;
-            self.send_changes(repo, &peer, remote_cursors, stream, transport)?;
+            self.receive_changes(
+                repo, direct_id, epoch, &peer, &mut round, stream, transport, deadline,
+            )?;
+            self.send_changes(
+                repo,
+                direct_id,
+                epoch,
+                &peer,
+                remote_cursors,
+                &mut round,
+                stream,
+                transport,
+                deadline,
+            )?;
+        }
+        if round.completed != round.total {
+            return Err("Incomplete synchronization snapshot".into());
         }
         Ok(())
     }
+    #[allow(clippy::too_many_arguments)]
     fn send_changes(
         &self,
         repo: &WordbookRepository,
+        direct_id: &str,
+        epoch: u64,
         peer: &DeviceId,
         mut cursors: BTreeMap<DeviceId, u64>,
+        round: &mut SyncRound,
         stream: &mut TcpStream,
         transport: &mut TransportState,
+        deadline: Instant,
     ) -> Result<()> {
-        for _ in (0..MAX_SYNC_CHANGES).step_by(16) {
+        let mut page_count = 0;
+        loop {
             let batch = repo
-                .exchange_batch(peer, &cursors, 16)
+                .exchange_batch_until(peer, &cursors, &round.local, 16)
                 .map_err(|e| format!("Sync export: {e:?}"))?;
             if batch.is_empty() {
                 send_sync(stream, transport, &SyncMessage::Done { complete: true })?;
-                return Ok(());
+                return expect_ack(stream, transport, deadline);
             }
             for change in batch {
-                cursors.insert(change.id.device.clone(), change.id.sequence);
+                let id = change.id.clone();
                 send_sync(stream, transport, &SyncMessage::Change(change))?;
+                expect_ack(stream, transport, deadline)?;
+                cursors.insert(id.device, id.sequence);
+                round.completed += 1;
+                self.update_progress(direct_id, epoch, round);
+                page_count += 1;
+            }
+            if page_count == MAX_SYNC_CHANGES {
+                send_sync(stream, transport, &SyncMessage::Done { complete: false })?;
+                expect_ack(stream, transport, deadline)?;
+                page_count = 0;
             }
         }
-        // A capped session is never acknowledged as fully synchronized.
-        let complete = repo
-            .exchange_batch(peer, &cursors, 1)
-            .map_err(|e| format!("Sync export: {e:?}"))?
-            .is_empty();
-        send_sync(stream, transport, &SyncMessage::Done { complete })?;
-        if complete {
-            Ok(())
-        } else {
-            Err("Sync page limit reached; retry required".into())
-        }
     }
+    #[allow(clippy::too_many_arguments)]
     fn receive_changes(
         &self,
         repo: &WordbookRepository,
         direct_id: &str,
         epoch: u64,
         peer: &DeviceId,
+        round: &mut SyncRound,
         stream: &mut TcpStream,
         transport: &mut TransportState,
         deadline: Instant,
     ) -> Result<()> {
-        for index in 0..=MAX_SYNC_CHANGES {
+        let mut cursors = round.local.clone();
+        let mut page_count = 0;
+        loop {
             match receive_sync(stream, transport, deadline)? {
                 SyncMessage::Change(change) => {
-                    if index == MAX_SYNC_CHANGES {
+                    if page_count == MAX_SYNC_CHANGES {
                         return Err("Sync page limit exceeded".into());
+                    }
+                    let expected = cursors
+                        .get(&change.id.device)
+                        .copied()
+                        .unwrap_or(0)
+                        .saturating_add(1);
+                    if change.id.sequence != expected
+                        || change.id.sequence
+                            > round.remote.get(&change.id.device).copied().unwrap_or(0)
+                    {
+                        return Err("Change is outside synchronization snapshot".into());
                     }
                     let inserted =
                         self.ingest_direct_change(direct_id, epoch, repo, peer, &change)?;
+                    cursors.insert(change.id.device.clone(), change.id.sequence);
+                    round.completed += 1;
+                    self.update_progress(direct_id, epoch, round);
                     if inserted {
                         if let Some(app) = &self.app {
                             let _ = app.emit("learning-data-synced", ());
                         }
                     }
+                    send_sync(stream, transport, &SyncMessage::Applied)?;
+                    page_count += 1;
                 }
-                SyncMessage::Done { complete: true } => return Ok(()),
-                SyncMessage::Done { complete: false } => {
-                    return Err("Peer has more changes; retry required".into())
+                SyncMessage::Done { complete } => {
+                    if complete
+                        && round
+                            .remote
+                            .iter()
+                            .any(|(origin, end)| cursors.get(origin).copied().unwrap_or(0) < *end)
+                    {
+                        return Err("Peer ended before synchronization snapshot was applied".into());
+                    }
+                    if !complete && page_count != MAX_SYNC_CHANGES {
+                        return Err("Invalid synchronization continuation".into());
+                    }
+                    send_sync(stream, transport, &SyncMessage::Applied)?;
+                    if complete {
+                        return Ok(());
+                    }
+                    page_count = 0;
                 }
                 _ => return Err("Unexpected sync message".into()),
             }
         }
-        Err("Sync page limit exceeded".into())
     }
     // Holding the same lock as remove makes an ingest commit and revocation linearizable.
     fn ingest_direct_change(
@@ -1161,6 +1523,8 @@ fn remove_discovered(state: &mut Shared, fullname: &str) {
         if let Some(sync) = state.sync.get_mut(&id) {
             sync.state = "offline".into();
             sync.detail = None;
+            sync.progress = None;
+            sync.retry_attempt = 0;
         }
     }
 }
@@ -1196,7 +1560,18 @@ enum SyncMessage {
     Change(Envelope),
     // Followed by encrypted raw chunks containing exactly length bytes of one Change.
     ChangeStart { length: usize },
+    Applied,
     Done { complete: bool },
+}
+fn expect_ack(
+    stream: &mut TcpStream,
+    transport: &mut TransportState,
+    deadline: Instant,
+) -> Result<()> {
+    match receive_sync(stream, transport, deadline)? {
+        SyncMessage::Applied => Ok(()),
+        _ => Err("Expected applied synchronization acknowledgement".into()),
+    }
 }
 fn send_frame(stream: &mut TcpStream, bytes: &[u8]) -> Result<()> {
     send_bounded_frame(stream, bytes, MAX_FRAME)
@@ -1208,7 +1583,7 @@ fn send_bounded_frame(stream: &mut TcpStream, bytes: &[u8], max: usize) -> Resul
     stream
         .write_all(&(bytes.len() as u16).to_be_bytes())
         .and_then(|_| stream.write_all(bytes))
-        .map_err(|e| e.to_string())
+        .map_err(|e| format!("LAN I/O: {e}"))
 }
 fn read_frame(stream: &mut TcpStream, deadline: Instant) -> Result<Vec<u8>> {
     read_bounded_frame(stream, deadline, MAX_FRAME)
@@ -1239,7 +1614,7 @@ fn read_exact_until(stream: &mut TcpStream, mut bytes: &mut [u8], deadline: Inst
             Err(e)
                 if e.kind() == std::io::ErrorKind::TimedOut
                     || e.kind() == std::io::ErrorKind::WouldBlock => {}
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(format!("LAN I/O: {e}")),
         }
     }
     Ok(())
@@ -1445,6 +1820,9 @@ pub fn lan_remove(backend: State<'_, LanBackend>, id: String) -> Result<()> {
     backend.service()?.remove(&id)
 }
 #[cfg(test)]
+#[path = "lan_feedback_tests.rs"]
+mod feedback_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
     #[test]
@@ -1530,6 +1908,8 @@ mod tests {
                     state: "syncing".into(),
                     detail: None,
                     last_sync: None,
+                    progress: None,
+                    retry_attempt: 0,
                 },
             );
         }
@@ -1873,12 +2253,15 @@ mod tests {
         );
     }
 
-    fn network_peer(dir: &Path) -> (Arc<LanService>, WordbookRepository) {
+    pub(super) fn network_peer(dir: &Path) -> (Arc<LanService>, WordbookRepository) {
         let repo = WordbookRepository::open(dir.join("words.sqlite")).unwrap();
         let service = LanService::open_with_repository(dir, Some(repo.clone()), None).unwrap();
         (service, repo)
     }
-    fn connect_pair(a: &Arc<LanService>, b: &Arc<LanService>) -> (Result<()>, Result<()>) {
+    pub(super) fn connect_pair(
+        a: &Arc<LanService>,
+        b: &Arc<LanService>,
+    ) -> (Result<()>, Result<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let responder = {
@@ -1892,7 +2275,7 @@ mod tests {
         );
         (initiator, responder.join().unwrap())
     }
-    fn mutual_trust(a: &LanService, b: &LanService) {
+    pub(super) fn mutual_trust(a: &LanService, b: &LanService) {
         a.trust(&snow_public(&b.key).unwrap(), "peer").unwrap();
         b.trust(&snow_public(&a.key).unwrap(), "peer").unwrap();
     }
@@ -2125,7 +2508,8 @@ mod tests {
         assert_eq!(br.list_wordbook_entries(book.id).unwrap().len(), 2000);
     }
 
-    fn protocol_transport_pair() -> (TcpStream, TransportState, TcpStream, TransportState) {
+    pub(super) fn protocol_transport_pair() -> (TcpStream, TransportState, TcpStream, TransportState)
+    {
         let a_key = [1u8; 32];
         let b_key = [2u8; 32];
         let mut a = Builder::new(NOISE.parse().unwrap())
@@ -2197,7 +2581,14 @@ mod tests {
             let service = a.clone();
             let peer_id = b.local_id.clone();
             let local = thread::spawn(move || {
-                service.synchronize(&peer_id, &mut left, &mut local_transport, initiator)
+                service.synchronize(
+                    &peer_id,
+                    &mut left,
+                    &mut local_transport,
+                    initiator,
+                    0,
+                    true,
+                )
             });
             if initiator {
                 assert!(matches!(
@@ -2259,11 +2650,10 @@ mod tests {
             let status = a.status();
             assert_eq!(status.sync[0].state, "error");
             assert_eq!(status.sync[0].last_sync, previous);
-            assert!(status.sync[0]
-                .detail
-                .as_ref()
-                .unwrap()
-                .contains("local 3, remote 4"));
+            assert!(status.sync[0].detail.as_ref().unwrap().contains(&format!(
+                "local {SYNC_PROTOCOL_VERSION}, remote {}",
+                SYNC_PROTOCOL_VERSION + 1
+            )));
             assert!(a.state.lock().unwrap().sync_ids.is_empty());
             ar.add_favorite("still usable", "仍可使用").unwrap();
         }

@@ -3,14 +3,76 @@ import { Dialog, DialogHeader } from "@astryxdesign/core/Dialog";
 import { Heading } from "@astryxdesign/core/Heading";
 import { Layout, LayoutContent, LayoutFooter } from "@astryxdesign/core/Layout";
 import { List, ListItem } from "@astryxdesign/core/List";
+import { ProgressBar } from "@astryxdesign/core/ProgressBar";
 import { Section } from "@astryxdesign/core/Section";
 import { Spinner } from "@astryxdesign/core/Spinner";
 import { Stack } from "@astryxdesign/core/Stack";
 import { Text } from "@astryxdesign/core/Text";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { type LanStatus, lanService, type TrustedPeer } from "../data/lan";
+import {
+  type LanStatus,
+  lanService,
+  type SyncView,
+  type TrustedPeer,
+} from "../data/lan";
 
+function SyncFeedback({
+  sync,
+  name,
+}: {
+  sync: SyncView | undefined;
+  name: string;
+}) {
+  if (!sync)
+    return <Text color="secondary">已直接配对；等待再次相遇自动同步</Text>;
+  const timestamp = Number(sync.last_sync);
+  const time =
+    sync.last_sync && Number.isFinite(timestamp)
+      ? `；上次同步：${new Date(timestamp * 1000).toLocaleString()}`
+      : "";
+  const state =
+    sync.state === "synced"
+      ? "同步完成"
+      : sync.state === "syncing"
+        ? "正在同步"
+        : sync.state === "retrying"
+          ? `正在重试（${sync.retry_attempt ?? 1}/3）`
+          : sync.state === "error"
+            ? "同步失败"
+            : sync.state === "offline"
+              ? "设备离线，等待重连"
+              : "等待同步";
+  const progress = sync.progress;
+  const showProgress =
+    sync.state !== "offline" &&
+    typeof progress === "number" &&
+    Number.isFinite(progress);
+  return (
+    <Stack gap={2}>
+      <Text
+        color="secondary"
+        role={sync.state === "error" ? "alert" : "status"}
+      >
+        {state}
+        {time}
+        {sync.state === "error" && sync.detail ? `；${sync.detail}` : ""}
+      </Text>
+      {showProgress ? (
+        <ProgressBar
+          label={`${name}同步进度`}
+          value={Math.max(
+            0,
+            Math.min(sync.state === "synced" ? 100 : 99, progress),
+          )}
+          hasValueLabel
+        />
+      ) : sync.state === "syncing" || sync.state === "retrying" ? (
+        <ProgressBar label={`${name}同步进度`} isIndeterminate />
+      ) : null}
+    </Stack>
+  );
+}
 function DevicesPage() {
   const navigate = useNavigate();
   const [status, setStatus] = useState<LanStatus | null>(null);
@@ -41,7 +103,13 @@ function DevicesPage() {
         (latest.pending.some((pending) => pending.peer_id === current.id) ||
           latest.trusted.some(
             (trusted) =>
-              trusted.peer_id === current.id && trusted.authenticated,
+              trusted.peer_id === current.id &&
+              (trusted.authenticated ||
+                latest.sync?.some(
+                  (sync) =>
+                    sync.id === trusted.id &&
+                    (sync.state === "retrying" || sync.state === "error"),
+                )),
           ) ||
           latest.error)
           ? null
@@ -223,26 +291,12 @@ function DevicesPage() {
               <ListItem
                 key={peer.id}
                 label={peer.name}
-                description={(() => {
-                  const sync = status.sync?.find((item) => item.id === peer.id);
-                  if (!sync) return "已直接配对；等待再次相遇自动同步";
-                  const timestamp = Number(sync.last_sync);
-                  const time =
-                    sync.last_sync && Number.isFinite(timestamp)
-                      ? `；上次同步：${new Date(timestamp * 1000).toLocaleString()}`
-                      : "";
-                  const state =
-                    sync.state === "synced"
-                      ? "同步完成"
-                      : sync.state === "syncing"
-                        ? "正在同步"
-                        : sync.state === "error"
-                          ? "同步失败"
-                          : sync.state === "offline"
-                            ? "设备离线，等待重连"
-                            : "等待同步";
-                  return `${state}${time}${sync.detail ? `；${sync.detail}` : ""}`;
-                })()}
+                description={
+                  <SyncFeedback
+                    sync={status.sync?.find((item) => item.id === peer.id)}
+                    name={peer.name}
+                  />
+                }
                 endContent={
                   <Button
                     label={`删除与 ${peer.name} 的配对`}
