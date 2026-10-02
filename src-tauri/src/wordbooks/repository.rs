@@ -55,7 +55,7 @@ fn is_learning(change: &replay::Envelope) -> bool {
         .is_some_and(|kind| {
             matches!(
                 kind.as_str(),
-                "mistake" | "schedule" | "complete" | "target"
+                "mistake" | "remove_mistake" | "schedule" | "complete" | "target"
             )
         })
 }
@@ -728,6 +728,42 @@ impl WordbookRepository {
         Ok(entry)
     }
 
+    pub fn remove_mistake(&self, english: &str, chinese: &str) -> Result<bool, RepositoryError> {
+        let (english, chinese) = favorite_pair(english, chinese)?;
+        let normalized = english.to_lowercase();
+        if self.sync_enabled()? {
+            let mut removed = false;
+            self.append_local_build(None, &SyncProjection, |tx| {
+                removed = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM mistakes WHERE normalized_english=?1 AND chinese=?2)",
+                    params![normalized, chinese],
+                    |row| row.get(0),
+                )?;
+                Ok(learning::LearningChange::RemoveMistake {
+                    english: english.to_owned(),
+                    chinese: chinese.to_owned(),
+                }.encode())
+            }).map_err(RepositoryError::Replay)?;
+            return Ok(removed);
+        }
+        let mut connection = self.connect()?;
+        let tx = connection.transaction()?;
+        let removed = tx.execute(
+            "DELETE FROM mistakes WHERE normalized_english=?1 AND chinese=?2",
+            params![normalized, chinese],
+        )? != 0;
+        tx.execute(
+            "DELETE FROM review_coverage WHERE source='mistakes' AND normalized_english=?1 AND chinese=?2",
+            params![normalized, chinese],
+        )?;
+        tx.execute(
+            "DELETE FROM outstanding_reviews WHERE source='mistakes' AND normalized_english=?1 AND chinese=?2",
+            params![normalized, chinese],
+        )?;
+        tx.commit()?;
+        Ok(removed)
+    }
+
     pub fn list_mistakes(&self) -> Result<Vec<MistakeEntry>, rusqlite::Error> {
         let connection = self.connect()?;
         let mut statement = connection
@@ -867,6 +903,9 @@ fn word_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<WordEntry> {
 #[cfg(test)]
 #[path = "repository/content_tests.rs"]
 mod content_tests;
+#[cfg(test)]
+#[path = "repository/mistake_removal_tests.rs"]
+mod mistake_removal_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

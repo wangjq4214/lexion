@@ -165,6 +165,16 @@ pub fn record_mistake_once(
 }
 
 #[tauri::command]
+pub fn remove_mistake(
+    english: String,
+    chinese: String,
+    repository: State<'_, WordbookRepository>,
+) -> Result<bool, CommandError> {
+    repository
+        .remove_mistake(&english, &chinese)
+        .map_err(map_repository_error)
+}
+#[tauri::command]
 pub fn list_mistakes(
     repository: State<'_, WordbookRepository>,
 ) -> Result<Vec<MistakeEntry>, CommandError> {

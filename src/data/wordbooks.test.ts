@@ -123,3 +123,25 @@ describe("review scheduling service contract", () => {
     });
   });
 });
+
+describe("mistake removal service contract", () => {
+  it("removes by word-and-meaning pair, accepts absence, and maps failure", async () => {
+    vi.mocked(invoke)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false)
+      .mockRejectedValueOnce({ kind: "database", message: "磁盘不可写" });
+    await expect(
+      tauriWordbookService.removeMistake("Apple", "苹果"),
+    ).resolves.toBe(true);
+    expect(invoke).toHaveBeenCalledWith("remove_mistake", {
+      english: "Apple",
+      chinese: "苹果",
+    });
+    await expect(
+      tauriWordbookService.removeMistake("Apple", "苹果"),
+    ).resolves.toBe(false);
+    await expect(
+      tauriWordbookService.removeMistake("Apple", "苹果"),
+    ).rejects.toMatchObject({ kind: "database", message: "磁盘不可写" });
+  });
+});

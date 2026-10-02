@@ -90,6 +90,7 @@ export type WordbookService = {
     chinese: string,
     submissionId: string,
   ): Promise<MistakeEntry>;
+  removeMistake(english: string, chinese: string): Promise<boolean>;
   listMistakes(): Promise<MistakeEntry[]>;
   sampleMistakes(limit: number): Promise<WordEntry[]>;
 };
@@ -242,6 +243,13 @@ export const tauriWordbookService: WordbookService = {
     }).catch((error) => {
       throw commandError(error);
     });
+  },
+  removeMistake(english, chinese) {
+    return invoke<boolean>("remove_mistake", { english, chinese }).catch(
+      (error) => {
+        throw commandError(error);
+      },
+    );
   },
   listMistakes() {
     return invoke<MistakeEntry[]>("list_mistakes").catch((error) => {

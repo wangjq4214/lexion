@@ -23,6 +23,10 @@ type PracticeQuestionProps = {
   favoriteError: string | null;
   onToggleFavorite: () => void;
   onRetryFavorite: () => void;
+  isRemovingMistake: boolean;
+  isMistakeRemoved: boolean;
+  mistakeRemovalError: string | null;
+  onRemoveMistake: () => void;
   canDelete: boolean;
   isDeleting: boolean;
   onRequestDelete: () => void;
@@ -83,6 +87,10 @@ export function PracticeQuestion({
   favoriteError,
   onToggleFavorite,
   onRetryFavorite,
+  isRemovingMistake,
+  isMistakeRemoved,
+  mistakeRemovalError,
+  onRemoveMistake,
   canDelete,
   isDeleting,
   onRequestDelete,
@@ -190,7 +198,22 @@ export function PracticeQuestion({
                   <Text size="xl">中文释义：{question.entry.chinese}</Text>
                 </>
               )}
-              <Stack direction="horizontal" gap={3} justify="end">
+              {state.revealReason === "wrong" && isMistakeRemoved ? (
+                <Text role="status">已从错题本移除</Text>
+              ) : null}
+              {state.revealReason === "wrong" && mistakeRemovalError ? (
+                <Text role="alert">{mistakeRemovalError}</Text>
+              ) : null}
+              <Stack direction="horizontal" gap={3} justify="end" wrap="wrap">
+                {state.revealReason === "wrong" && !isMistakeRemoved ? (
+                  <Button
+                    label="从错题本移除"
+                    variant="secondary"
+                    isLoading={isRemovingMistake}
+                    isDisabled={isCompleting || isBlocked}
+                    onClick={onRemoveMistake}
+                  />
+                ) : null}
                 <Button
                   label={
                     state.questionIndex === state.questions.length - 1

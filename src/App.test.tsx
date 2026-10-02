@@ -135,6 +135,15 @@ function createService(options?: {
         return result;
       },
     ),
+    removeMistake: vi.fn(async (english: string, chinese: string) => {
+      const before = mistakes.length;
+      mistakes = mistakes.filter(
+        (entry) =>
+          entry.english.toLowerCase() !== english.trim().toLowerCase() ||
+          entry.chinese !== chinese.trim(),
+      );
+      return mistakes.length !== before;
+    }),
     listMistakes: vi.fn(async () => [...mistakes]),
     sampleMistakes: vi.fn(async (limit: number) => mistakes.slice(0, limit)),
     sampleExam: vi.fn(
@@ -2169,6 +2178,7 @@ describe("App wordbook practice", () => {
     await user.click(await screen.findByRole("button", { name: "开始练习" }));
     await user.type(screen.getByLabelText("英文答案"), "bad{Enter}");
     expect(screen.getByRole("button", { name: "退出并结算" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "从错题本移除" })).toBeDisabled();
     await act(async () => {
       releaseMistake();
       await pendingMistake;
@@ -2177,6 +2187,7 @@ describe("App wordbook practice", () => {
       expect(service.completeReview).toHaveBeenCalledTimes(1),
     );
     expect(screen.getByRole("button", { name: "退出并结算" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "从错题本移除" })).toBeDisabled();
     expect(service.completeReview).toHaveBeenCalledWith({
       reviewId: 1,
       errorCount: 1,
@@ -2905,4 +2916,215 @@ describe("file routes and round navigation", () => {
     expect(instance.recordMistake).toHaveBeenCalledTimes(2);
     expect(instance.completeReview).not.toHaveBeenCalled();
   });
+});
+
+describe("removing the current wrong answer from mistakes", () => {
+  const apple = { id: 1, english: "apple", chinese: "苹果" };
+  const makeService = () =>
+    createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [apple] },
+      favorites: [{ ...apple, id: 21 }],
+      mistakes: [{ ...apple, id: 31, errorCount: 4 }],
+    });
+
+  it.each([
+    ["单词本", "看中文拼英文", "英文答案"],
+    ["收藏夹", "看中文拼英文", "英文答案"],
+    ["错题本", "看英文拼中文", "中文答案"],
+  ])(
+    "removes the existing record during %s practice without changing content or scoring",
+    async (source, mode, answerLabel) => {
+      const user = userEvent.setup();
+      const service = makeService();
+      render(<App wordbookService={service} />);
+      await screen.findByRole("button", { name: "开始练习" });
+      if (source !== "单词本") {
+        await user.click(screen.getByRole("combobox", { name: "练习来源" }));
+        await user.click(await screen.findByRole("option", { name: source }));
+      }
+      await user.click(screen.getByRole("combobox", { name: "练习模式" }));
+      await user.click(await screen.findByRole("option", { name: mode }));
+      await user.click(screen.getByRole("button", { name: "开始练习" }));
+      expect(
+        screen.queryByRole("button", { name: "从错题本移除" }),
+      ).not.toBeInTheDocument();
+      await user.type(screen.getByLabelText(answerLabel), "bad{Enter}");
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "从错题本移除" }),
+        ).toBeEnabled(),
+      );
+      expect((await service.listMistakes())[0].errorCount).toBe(5);
+      await user.click(screen.getByRole("button", { name: "从错题本移除" }));
+      expect(await screen.findByText("已从错题本移除")).toBeInTheDocument();
+      expect(service.removeMistake).toHaveBeenCalledExactlyOnceWith(
+        "apple",
+        "苹果",
+      );
+      expect(await service.listMistakes()).toEqual([]);
+      expect(await service.listWordbookEntries(1)).toEqual([apple]);
+      expect(await service.isFavorite("apple", "苹果")).toBe(true);
+      expect(service.deleteWordbookEntry).not.toHaveBeenCalled();
+      expect(service.removeFavorite).not.toHaveBeenCalled();
+      await user.click(screen.getByRole("button", { name: "查看练习结果" }));
+      expect(await screen.findByText("错误次数：1")).toBeInTheDocument();
+      expect(screen.getByText("答对题数：0 / 1")).toBeInTheDocument();
+      expect(screen.getByText("跳过次数：0")).toBeInTheDocument();
+      expect(service.recordMistakeOnce).toHaveBeenCalledTimes(1);
+      expect(service.completeReview).toHaveBeenCalledExactlyOnceWith({
+        reviewId: 1,
+        errorCount: 1,
+        hintCount: 0,
+        skipped: false,
+      });
+      expect(await service.listMistakes()).toEqual([]);
+    },
+  );
+
+  it("removes a newly added mistake and allows a later wrong answer to re-add it", async () => {
+    const user = userEvent.setup();
+    const service = createService({
+      wordbooks: [{ id: 1, name: "基础", entryCount: 1 }],
+      samples: { 1: [apple] },
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.type(screen.getByLabelText("英文答案"), "bad{Enter}");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "从错题本移除" }),
+      ).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "从错题本移除" }));
+    await screen.findByText("已从错题本移除");
+    await user.click(screen.getByRole("button", { name: "退出并结算" }));
+    expect(await screen.findByText("错误次数：1")).toBeInTheDocument();
+    expect(await service.listMistakes()).toEqual([]);
+    await user.click(screen.getByRole("button", { name: "返回模式选择" }));
+    await user.click(screen.getByRole("button", { name: "开始练习" }));
+    await user.type(screen.getByLabelText("英文答案"), "bad{Enter}");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "从错题本移除" }),
+      ).toBeEnabled(),
+    );
+    expect(screen.queryByText("已从错题本移除")).not.toBeInTheDocument();
+    expect((await service.listMistakes())[0].errorCount).toBe(1);
+    expect(vi.mocked(service.recordMistakeOnce).mock.calls[0][2]).not.toBe(
+      vi.mocked(service.recordMistakeOnce).mock.calls[1][2],
+    );
+  });
+
+  it("keeps the answer and record on removal failure, then retries successfully", async () => {
+    const user = userEvent.setup();
+    const service = makeService();
+    vi.mocked(service.removeMistake).mockRejectedValueOnce(
+      new Error("磁盘不可写"),
+    );
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.type(screen.getByLabelText("英文答案"), "bad{Enter}");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "从错题本移除" }),
+      ).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "从错题本移除" }));
+    expect(
+      await screen.findByText("从错题本移除失败，请重试：磁盘不可写"),
+    ).toHaveAttribute("role", "alert");
+    expect(await service.listMistakes()).toHaveLength(1);
+    expect(screen.queryByText("已从错题本移除")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看练习结果" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "从错题本移除" }));
+    await screen.findByText("已从错题本移除");
+    expect(screen.queryByText(/从错题本移除失败/)).not.toBeInTheDocument();
+    expect(await service.listMistakes()).toEqual([]);
+  });
+
+  it("blocks continuation, exit, and wordbook deletion while removing", async () => {
+    const user = userEvent.setup();
+    const service = makeService();
+    let release = () => {};
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const remove = service.removeMistake;
+    service.removeMistake = vi.fn(async (english, chinese) => {
+      await pending;
+      return remove(english, chinese);
+    });
+    render(<App wordbookService={service} />);
+    await user.click(await screen.findByRole("button", { name: "开始练习" }));
+    await user.type(screen.getByLabelText("英文答案"), "bad{Enter}");
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "从错题本移除" }),
+      ).toBeEnabled(),
+    );
+    await user.click(screen.getByRole("button", { name: "从错题本移除" }));
+    for (const name of ["从错题本移除", "查看练习结果", "退出并结算"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+    const deleteButton = screen.getByRole("button", {
+      name: "从单词本删除当前单词",
+    });
+    expect(deleteButton).toHaveAttribute("aria-disabled", "true");
+    fireEvent.click(deleteButton);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "从错题本移除" }));
+    expect(service.removeMistake).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      release();
+      await pending;
+    });
+    await screen.findByText("已从错题本移除");
+    expect(screen.getByRole("button", { name: "退出并结算" })).toBeEnabled();
+  });
+
+  it.each(["continue", "delete"] as const)(
+    "does not leak removal feedback after %s or suppress the next question",
+    async (action) => {
+      const user = userEvent.setup();
+      const service = createService({
+        wordbooks: [{ id: 1, name: "基础", entryCount: 2 }],
+        samples: { 1: [apple, { id: 2, english: "book", chinese: "书" }] },
+      });
+      render(<App wordbookService={service} />);
+      await user.click(await screen.findByRole("button", { name: "开始练习" }));
+      await user.type(screen.getByLabelText("英文答案"), "bad{Enter}");
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "从错题本移除" }),
+        ).toBeEnabled(),
+      );
+      await user.click(screen.getByRole("button", { name: "从错题本移除" }));
+      await screen.findByText("已从错题本移除");
+      if (action === "continue") {
+        await user.click(screen.getByRole("button", { name: "下一题" }));
+      } else {
+        await user.click(
+          screen.getByRole("button", { name: "从单词本删除当前单词" }),
+        );
+        await user.click(screen.getByRole("button", { name: "删除单词" }));
+        await screen.findByLabelText("英文答案");
+      }
+      expect(screen.queryByText("已从错题本移除")).not.toBeInTheDocument();
+      await user.type(screen.getByLabelText("英文答案"), "bad{Enter}");
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "从错题本移除" }),
+        ).toBeEnabled(),
+      );
+      expect(
+        (await service.listMistakes()).map((entry) => entry.english),
+      ).toEqual(["book"]);
+      await user.click(screen.getByRole("button", { name: "查看练习结果" }));
+      expect(
+        await screen.findByText(`错误次数：${action === "continue" ? 2 : 1}`),
+      ).toBeInTheDocument();
+      expect(service.recordMistakeOnce).toHaveBeenCalledTimes(2);
+    },
+  );
 });

@@ -29,6 +29,10 @@ function renderQuestion(revealReason: "skip" | "wrong" | null) {
       favoriteError={null}
       onToggleFavorite={vi.fn()}
       onRetryFavorite={vi.fn()}
+      isRemovingMistake={false}
+      isMistakeRemoved={false}
+      mistakeRemovalError={null}
+      onRemoveMistake={vi.fn()}
       canDelete={false}
       isDeleting={false}
       onRequestDelete={vi.fn()}
@@ -59,5 +63,21 @@ describe("PracticeQuestion vocabulary typography", () => {
     renderQuestion("wrong");
     expect(screen.getByText(/你的答案：/)).toHaveAttribute("data-size", "xl");
     expect(screen.getByText(/正确答案：/)).toHaveAttribute("data-size", "xl");
+  });
+});
+
+describe("PracticeQuestion mistake removal visibility", () => {
+  it.each([null, "skip"] as const)(
+    "does not offer removal for %s",
+    (reason) => {
+      renderQuestion(reason);
+      expect(
+        screen.queryByRole("button", { name: "从错题本移除" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+  it("offers a clearly separate action after a wrong answer", () => {
+    renderQuestion("wrong");
+    expect(screen.getByRole("button", { name: "从错题本移除" })).toBeEnabled();
   });
 });

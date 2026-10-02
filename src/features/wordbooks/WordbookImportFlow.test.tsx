@@ -42,6 +42,7 @@ function service(overrides?: Partial<WordbookService>): WordbookService {
       chinese,
       errorCount: 1,
     })),
+    removeMistake: vi.fn(async () => true),
     listMistakes: vi.fn(async () => []),
     sampleMistakes: vi.fn(async () => []),
     ...overrides,

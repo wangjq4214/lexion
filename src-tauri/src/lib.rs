@@ -37,6 +37,7 @@ pub fn run() {
             wordbooks::sample_favorites,
             wordbooks::record_mistake,
             wordbooks::record_mistake_once,
+            wordbooks::remove_mistake,
             wordbooks::list_mistakes,
             wordbooks::sample_mistakes,
             wordbooks::sample_exam,

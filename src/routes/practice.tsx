@@ -109,6 +109,13 @@ function PracticePage() {
   const completingReview = useRef(false);
   const pendingMistakeRef = useRef<MistakeSubmission | null>(null);
   const savingMistakeRef = useRef(false);
+  const removingMistakeRef = useRef(false);
+  const [isRemovingMistake, setIsRemovingMistake] = useState(false);
+  const [mistakeRemoval, setMistakeRemoval] = useState<{
+    key: string;
+    removed: boolean;
+    error: string | null;
+  } | null>(null);
   const deletingRef = useRef(false);
   const favoriteBusy = useRef(false);
   const favoriteRequest = useRef(0);
@@ -140,6 +147,39 @@ function PracticePage() {
     state.phase === "practice"
       ? state.questions[state.questionIndex].entry
       : null;
+  const mistakeRemovalKey = `${roundKey}:${state.phase === "practice" ? state.questions[state.questionIndex].id : "none"}`;
+  const currentMistakeRemoval =
+    mistakeRemoval?.key === mistakeRemovalKey ? mistakeRemoval : null;
+  const removeMistake = async () => {
+    if (
+      state.phase !== "practice" ||
+      state.revealReason !== "wrong" ||
+      !currentEntry ||
+      currentMistakeRemoval?.removed ||
+      removingMistakeRef.current ||
+      savingMistakeRef.current ||
+      pendingMistakeRef.current ||
+      completingReview.current ||
+      deletingRef.current
+    )
+      return;
+    removingMistakeRef.current = true;
+    setIsRemovingMistake(true);
+    setMistakeRemoval({ key: mistakeRemovalKey, removed: false, error: null });
+    try {
+      await service.removeMistake(currentEntry.english, currentEntry.chinese);
+      setMistakeRemoval({ key: mistakeRemovalKey, removed: true, error: null });
+    } catch (error) {
+      setMistakeRemoval({
+        key: mistakeRemovalKey,
+        removed: false,
+        error: `从错题本移除失败，请重试：${error instanceof Error ? error.message : String(error)}`,
+      });
+    } finally {
+      removingMistakeRef.current = false;
+      setIsRemovingMistake(false);
+    }
+  };
   const favoriteQueryKey =
     state.phase === "practice"
       ? `${roundKey}:${state.questionIndex}:${favoriteRefresh}`
@@ -282,6 +322,7 @@ function PracticePage() {
       state.phase !== "practice" ||
       completingReview.current ||
       deletingRef.current ||
+      removingMistakeRef.current ||
       pendingMistakeRef.current
     )
       return;
@@ -309,6 +350,7 @@ function PracticePage() {
       state.revealReason !== null ||
       completingReview.current ||
       deletingRef.current ||
+      removingMistakeRef.current ||
       pendingMistakeRef.current
     )
       return;
@@ -339,6 +381,7 @@ function PracticePage() {
       wordbookId === null ||
       pendingMistakeRef.current ||
       completingReview.current ||
+      removingMistakeRef.current ||
       deletingRef.current
     )
       return;
@@ -361,6 +404,7 @@ function PracticePage() {
       state.questionIndex !== target.questionIndex ||
       state.questions[state.questionIndex].reviewId !== target.reviewId ||
       pendingMistakeRef.current ||
+      removingMistakeRef.current ||
       completingReview.current
     ) {
       setDeleteTarget(null);
@@ -452,7 +496,11 @@ function PracticePage() {
         state={state}
         elapsedSeconds={elapsedSeconds}
         isCompleting={isCompleting}
-        isBlocked={pendingMistake !== null || isDeleting}
+        isBlocked={pendingMistake !== null || isDeleting || isRemovingMistake}
+        isRemovingMistake={isRemovingMistake}
+        isMistakeRemoved={currentMistakeRemoval?.removed ?? false}
+        mistakeRemovalError={currentMistakeRemoval?.error ?? null}
+        onRemoveMistake={() => void removeMistake()}
         isFavorite={isFavorite}
         canDelete={source === "wordbook"}
         isDeleting={isDeleting}
@@ -467,6 +515,7 @@ function PracticePage() {
             completingReview.current ||
             pendingMistakeRef.current ||
             deletingRef.current ||
+            removingMistakeRef.current ||
             state.revealReason !== null
           )
             return;
@@ -494,6 +543,7 @@ function PracticePage() {
             completingReview.current ||
             pendingMistakeRef.current ||
             deletingRef.current ||
+            removingMistakeRef.current ||
             state.revealReason !== null
           )
             return;

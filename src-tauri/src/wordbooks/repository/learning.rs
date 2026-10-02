@@ -21,6 +21,10 @@ pub(super) enum LearningChange {
         chinese: String,
         submission: Option<String>,
     },
+    RemoveMistake {
+        english: String,
+        chinese: String,
+    },
     Schedule {
         source: String,
         book: Option<String>,
@@ -60,6 +64,7 @@ impl LearningChange {
                     return Err(ReplayError::Invalid("empty submission"));
                 }
             }
+            Self::RemoveMistake { english, chinese } => pair(english, chinese)?,
             Self::Schedule {
                 source,
                 book,
@@ -201,6 +206,23 @@ impl Projection for LearningProjection {
                 tx.execute("INSERT INTO mistakes(english,chinese,normalized_english,error_count) VALUES (?1,?2,?3,1)
                     ON CONFLICT(normalized_english,chinese) DO UPDATE SET error_count=error_count+1",
                     params![english,chinese,normalized])?;
+            }
+            LearningChange::RemoveMistake { english, chinese } => {
+                let normalized = english.to_lowercase();
+                tx.execute(
+                    "DELETE FROM mistakes WHERE normalized_english=?1 AND chinese=?2",
+                    params![normalized, chinese],
+                )?;
+                tx.execute(
+                    "DELETE FROM review_coverage WHERE source='mistakes' AND normalized_english=?1 AND chinese=?2",
+                    params![normalized, chinese],
+                )?;
+                tx.execute(
+                    "DELETE FROM outstanding_reviews WHERE source='mistakes' AND normalized_english=?1 AND chinese=?2",
+                    params![normalized, chinese],
+                )?;
+                // Retain submission claims and pending completion identities. A retry of
+                // the old answer must not re-add the pair, but a new answer may do so.
             }
             LearningChange::Schedule {
                 source,
